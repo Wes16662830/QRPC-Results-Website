@@ -29,7 +29,7 @@ export interface WhatsAppRace {
   firstBird: { fancierName: string; ring: string; speed: number } | null;
   fanciers: { rank: number | null; fancierName: string; score: number; birdsScored: number }[];
   n: number;
-  scoringBirds: number;
+  competitionName: string;
   url?: string;
 }
 
@@ -39,7 +39,7 @@ export function whatsappRaceSummary(r: WhatsAppRace): string {
     `${r.basketed ?? "?"} basketed · ${r.returned} home`,
   ];
   if (r.firstBird) lines.push(`1st bird: ${r.firstBird.fancierName} – ${fmtSpeed(r.firstBird.speed)} m/min`);
-  lines.push("", `*${r.scoringBirds}-bird result* (${r.n} scoring birds)`);
+  lines.push("", `*${r.competitionName}* (${r.n} scoring birds)`);
   let shown = 0;
   for (const f of r.fanciers) {
     shown += 1;
@@ -50,8 +50,8 @@ export function whatsappRaceSummary(r: WhatsAppRace): string {
   return lines.join("\n");
 }
 
-export function whatsappStandings(season: number, races: number, standings: { rank: number; fancierName: string; total: number }[], url?: string): string {
-  const lines = [`*QRPC ${season} 5-bird championship*`, `After ${races} race${races === 1 ? "" : "s"}`, ""];
+export function whatsappStandings(season: number, competitionName: string, races: number, standings: { rank: number; fancierName: string; total: number }[], url?: string): string {
+  const lines = [`*QRPC ${season} – ${competitionName}*`, `After ${races} race${races === 1 ? "" : "s"}`, ""];
   for (const s of standings) lines.push(`${s.rank}. ${s.fancierName} – ${s.total} pts`);
   if (url) lines.push("", url);
   return lines.join("\n");

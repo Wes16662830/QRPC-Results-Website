@@ -83,25 +83,50 @@ CREATE TABLE override (
   revoked_by  TEXT
 );
 
--- Championship settings. Rows are never updated: each change inserts a new version.
-CREATE TABLE settings_version (
+-- A competition = one scoring system + parameters + which races count.
+-- QRPC's 5-bird championship is the first; more result/point systems are added as rows.
+CREATE TABLE competition (
   id             INTEGER PRIMARY KEY,
   club_id        INTEGER NOT NULL REFERENCES club(id),
-  scoring_birds  INTEGER NOT NULL CHECK (scoring_birds >= 1),
+  name           TEXT    NOT NULL,
+  slug           TEXT    NOT NULL,
+  system         TEXT    NOT NULL,             -- id in src/core/scoring/systems.ts
+  display_order  INTEGER NOT NULL DEFAULT 0,   -- lowest = main competition (home page)
+  active         INTEGER NOT NULL DEFAULT 1,
+  created_at     TEXT    NOT NULL,
+  UNIQUE (club_id, slug)
+);
+
+-- Competition settings. Rows are never updated: each change inserts a new version.
+CREATE TABLE competition_version (
+  id             INTEGER PRIMARY KEY,
+  competition_id INTEGER NOT NULL REFERENCES competition(id),
+  params_json    TEXT    NOT NULL,             -- validated by the system's parse()
   races_counted  TEXT    NOT NULL CHECK (races_counted IN ('all','best')),
   best_x         INTEGER,
   created_at     TEXT    NOT NULL,
   actor          TEXT    NOT NULL
 );
-INSERT INTO settings_version (club_id, scoring_birds, races_counted, best_x, created_at, actor)
-VALUES (1, 5, 'all', NULL, '2026-11-18T00:00:00Z', 'system');
 
--- A stored 5-bird calculation for one race, with everything needed to audit or redo it.
+-- Races left out of one competition (on top of the race-level Race/Training and included flags).
+CREATE TABLE competition_exclusion (
+  competition_id INTEGER NOT NULL REFERENCES competition(id),
+  race_id        INTEGER NOT NULL REFERENCES race(id),
+  PRIMARY KEY (competition_id, race_id)
+);
+
+INSERT INTO competition (id, club_id, name, slug, system, display_order, created_at)
+VALUES (1, 1, '5-bird championship', 'five-bird', 'top-n-per-fancier', 0, '2026-11-18T00:00:00Z');
+INSERT INTO competition_version (competition_id, params_json, races_counted, best_x, created_at, actor)
+VALUES (1, '{"scoringBirds":5}', 'all', NULL, '2026-11-18T00:00:00Z', 'system');
+
+-- A stored calculation of one race for one competition, with everything needed to audit or redo it.
 CREATE TABLE race_calc (
   id                  INTEGER PRIMARY KEY,
   race_id             INTEGER NOT NULL REFERENCES race(id),
+  competition_id      INTEGER NOT NULL REFERENCES competition(id),
+  competition_version_id INTEGER NOT NULL REFERENCES competition_version(id),
   snapshot_id         INTEGER NOT NULL REFERENCES snapshot(id),
-  settings_version_id INTEGER NOT NULL REFERENCES settings_version(id),
   overrides_json      TEXT    NOT NULL,
   result_json         TEXT    NOT NULL,       -- RaceCalculation from the engine
   inputs_sha256       TEXT    NOT NULL,
@@ -111,13 +136,13 @@ CREATE TABLE race_calc (
   published_at        TEXT,
   published_by        TEXT
 );
-CREATE INDEX race_calc_race ON race_calc (race_id, status);
+CREATE INDEX race_calc_race ON race_calc (race_id, competition_id, status);
 
 CREATE TABLE race_calc_score (
   race_calc_id  INTEGER NOT NULL REFERENCES race_calc(id),
   fancier_id    INTEGER NOT NULL REFERENCES fancier(id),
   birds_scored  INTEGER NOT NULL,
-  score         INTEGER NOT NULL,
+  score         REAL    NOT NULL,          -- REAL: future systems may award fractional points
   PRIMARY KEY (race_calc_id, fancier_id)
 );
 

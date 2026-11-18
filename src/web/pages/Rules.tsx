@@ -1,4 +1,5 @@
 import { useApi } from "../hooks";
+import type { CompetitionInfo } from "../types";
 import { Card, PageTitle, TableWrap } from "../ui";
 
 const GLENN = [
@@ -10,12 +11,26 @@ const GLENN = [
 ];
 
 export function RulesPage() {
-  const { data } = useApi<{ scoringBirds: number; racesCounted: "all" | "best"; bestX: number | null }>("/api/rules");
-  const x = data?.scoringBirds ?? 5;
+  const { data: comps } = useApi<CompetitionInfo[]>("/api/competitions");
+  const five = comps?.find((c) => c.system === "top-n-per-fancier") ?? null;
+  const data = five;
+  const x = Number(five?.params.scoringBirds ?? 5);
   return (
     <>
-      <PageTitle title={`How the ${x}-bird championship works`} />
+      <PageTitle title="Rules" sub="How the club's results and championships are worked out" />
       <div className="space-y-4">
+        {comps && comps.length > 1 && (
+          <Card title="Competitions">
+            <ul className="space-y-2 text-sm">
+              {comps.map((c) => (
+                <li key={c.slug}>
+                  <strong>{c.name}</strong>: {c.rules} {c.racesCounted === "best" ? `Best ${c.bestX} races count.` : "All counted races count."}
+                </li>
+              ))}
+            </ul>
+          </Card>
+        )}
+        <h2 className="pt-2 text-lg font-semibold">{five?.name ?? "5-bird championship"}</h2>
         <Card title="For each race">
           <ol className="list-decimal space-y-2 pl-5 text-sm leading-relaxed">
             <li>We start from Benzing's <strong>full result</strong>: every bird that came home, fastest (highest m/min) first. Benzing's own points and championships are not used.</li>

@@ -7,11 +7,12 @@ import { isMember, logoutCookie, memberLogin, setMemberPassword, verifyAccessJwt
 import { BenzingClient } from "./benzingClient";
 import type { Env } from "./env";
 import {
-  adminOverview, championship, defaultSeason, fancierDetail, home, listRaces, live, raceDetail, seasons,
+  adminOverview, adminRaceDetail, championship, defaultSeason, fancierDetail, home, listCompetitions, listRaces, live, raceDetail, seasons,
 } from "./queries";
+import { SYSTEMS } from "../core/scoring/systems";
 import {
-  addOverride, audit, calculateResults, currentSettings, publish, recalculateRace, recalculateSeason,
-  revokeOverride, syncRaces, updateRace, updateSettings, UserError, type Ctx,
+  addOverride, audit, calculateResults, createCompetition, publish, recalculateRace, recalculateSeason,
+  revokeOverride, setCompetitionRace, syncRaces, updateCompetition, updateRace, UserError, type Ctx,
 } from "./services";
 
 export interface ApiDeps {
@@ -115,27 +116,25 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     if (path === "/api/seasons") return json(await seasons(db));
     if (path === "/api/races") return json(await listRaces(db, await seasonParam(), now));
     if (path === "/api/live") return json(await live(db, now));
-    if (path === "/api/rules") {
-      const s = await currentSettings(db);
-      return json({ scoringBirds: s.scoring_birds, racesCounted: s.races_counted, bestX: s.best_x });
-    }
-    if (path === "/api/championship") return json(await championship(db, await seasonParam()));
+    const compParam = url.searchParams.get("competition");
+    if (path === "/api/competitions") return json(await listCompetitions(db));
+    if (path === "/api/championship") return json(await championship(db, compParam, await seasonParam()));
     if (path === "/api/championship/export.csv" || path === "/api/championship/whatsapp") {
-      const c = await championship(db, await seasonParam());
-      if (path.endsWith("whatsapp")) return json({ text: whatsappStandings(c.season, c.races.length, c.standings, url.origin) });
+      const c = await championship(db, compParam, await seasonParam());
+      if (path.endsWith("whatsapp")) return json({ text: whatsappStandings(c.season, c.competition.name, c.races.length, c.standings, url.origin) });
       return csvResponse(
         csv([
           ["Place", "Fancier", ...c.races.map((r) => r.name), "Total"],
           ...c.standings.map((s) => [s.rank, s.fancierName, ...c.races.map((r) => s.perRace[String(r.id)] ?? 0), s.total]),
         ]),
-        `qrpc-${c.season}-5-bird-championship.csv`,
+        `qrpc-${c.season}-${c.competition.slug}.csv`,
       );
     }
     let r = m(/^\/api\/races\/(\d+)$/);
-    if (r) return json(await raceDetail(db, Number(r[1]), now, { admin: false }));
-    r = m(/^\/api\/races\/(\d+)\/(full|five-bird)\.csv$/);
+    if (r) return json(await raceDetail(db, Number(r[1]), now));
+    r = m(/^\/api\/races\/(\d+)\/(full|result)\.csv$/);
     if (r) {
-      const d = await raceDetail(db, Number(r[1]), now, { admin: false });
+      const d = await raceDetail(db, Number(r[1]), now);
       const base = `qrpc-${d.race.date}-${slugify(d.race.name)}`;
       if (r[2] === "full") {
         return csvResponse(
@@ -146,27 +145,26 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
           `${base}-full-result.csv`,
         );
       }
-      if (!d.fiveBird) throw new UserError("The 5-bird result for this race is not published yet.", 404);
+      const res = pickResult(d.results, compParam);
       return csvResponse(
         csv([
           ["Scoring position", "Points", "Fancier", "Ring", "Position in full result", "Arrival", "Speed (m/min)"],
-          ...d.fiveBird.lines.map((l) => [l.scoringPosition, l.points, l.fancierName, l.ring, l.benzingPosition, fmtArrival(l.arrivalDay, l.arrivalTime), l.speed.toFixed(3)]),
+          ...res.published.lines.map((l) => [l.scoringPosition, l.points, l.fancierName, l.ring, l.benzingPosition, fmtArrival(l.arrivalDay, l.arrivalTime), l.speed.toFixed(3)]),
           [],
           ["Place", "Fancier", "Birds scored", "Race score"],
-          ...d.fiveBird.fanciers.map((f) => [f.rank ?? "=", f.fancierName, f.birdsScored, f.score]),
+          ...res.published.fanciers.map((f) => [f.rank ?? "=", f.fancierName, f.birdsScored, f.score]),
         ]),
-        `${base}-5-bird-result.csv`,
+        `${base}-${res.competition.slug}.csv`,
       );
     }
     r = m(/^\/api\/races\/(\d+)\/whatsapp$/);
     if (r) {
-      const d = await raceDetail(db, Number(r[1]), now, { admin: false });
-      if (!d.fiveBird) throw new UserError("The 5-bird result for this race is not published yet.", 404);
-      const s = await currentSettings(db);
+      const d = await raceDetail(db, Number(r[1]), now);
+      const res = pickResult(d.results, compParam);
       return json({
         text: whatsappRaceSummary({
           name: d.race.name, date: d.race.date, basketed: d.race.basketed, returned: d.returned, firstBird: d.firstBird,
-          fanciers: d.fiveBird.fanciers, n: d.fiveBird.n, scoringBirds: s.scoring_birds, url: `${url.origin}/races/${d.race.id}`,
+          fanciers: res.published.fanciers, n: res.published.n, competitionName: res.competition.name, url: `${url.origin}/races/${d.race.id}`,
         }),
       });
     }
@@ -181,6 +179,14 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     console.error("API error", (e as Error).message);
     return json({ error: "Something went wrong. The last good data is still shown." }, 500);
   }
+}
+
+type RaceResults = Awaited<ReturnType<typeof raceDetail>>["results"];
+function pickResult(results: RaceResults, slug: string | null) {
+  const res = slug ? results.find((x) => x.competition.slug === slug) : results[0];
+  if (!res) throw new UserError("Competition not found.", 404);
+  if (!res.published) throw new UserError(`The ${res.competition.name} result for this race is not published yet.`, 404);
+  return { competition: res.competition, published: res.published };
 }
 
 async function adminRoutes(
@@ -206,14 +212,29 @@ async function adminRoutes(
     const { season } = await body<{ season?: number }>(request);
     return json(await recalculateSeason(ctx, Number(season) || (await seasonParam()), actor));
   }
-  if (path === "/api/admin/settings") {
+  if (path === "/api/admin/competitions") {
     if (post) {
-      const b = await body<{ scoringBirds: number; racesCounted: "all" | "best"; bestX: number | null; season?: number }>(request);
-      const drafts = await updateSettings(ctx, { scoringBirds: Number(b.scoringBirds), racesCounted: b.racesCounted, bestX: b.bestX === null ? null : Number(b.bestX) }, actor, Number(b.season) || (await seasonParam()));
-      return json({ ok: true, newDrafts: drafts.filter((d) => d.changed).length });
+      const b = await body<{ name: string; system: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null; season?: number }>(request);
+      return json(await createCompetition(ctx, b, actor, Number(b.season) || (await seasonParam())));
     }
-    const s = await currentSettings(db);
-    return json({ scoringBirds: s.scoring_birds, racesCounted: s.races_counted, bestX: s.best_x, updatedAt: s.created_at, updatedBy: s.actor });
+    const comps = await listCompetitions(db, { activeOnly: false });
+    const exclusions = await db.prepare("SELECT competition_id, race_id FROM competition_exclusion").all<{ competition_id: number; race_id: number }>();
+    return json({
+      competitions: comps.map((c) => ({ ...c, excludedRaceIds: exclusions.results.filter((e) => e.competition_id === c.id).map((e) => e.race_id) })),
+      systems: Object.values(SYSTEMS).map((s) => ({ id: s.id, name: s.name, fields: s.fields, defaults: s.defaults })),
+    });
+  }
+  let c = m(/^\/api\/admin\/competitions\/(\d+)$/);
+  if (c && post) {
+    const b = await body<{ name?: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null; active?: boolean; displayOrder?: number; season?: number }>(request);
+    const drafts = await updateCompetition(ctx, Number(c[1]), b, actor, Number(b.season) || (await seasonParam()));
+    return json({ ok: true, newDrafts: drafts.filter((d) => d.changed).length });
+  }
+  c = m(/^\/api\/admin\/competitions\/(\d+)\/races\/(\d+)$/);
+  if (c && post) {
+    const b = await body<{ included: boolean }>(request);
+    await setCompetitionRace(ctx, Number(c[1]), Number(c[2]), Boolean(b.included), actor);
+    return json({ ok: true });
   }
   if (path === "/api/admin/member-password" && post) {
     const { password } = await body<{ password?: string }>(request);
@@ -241,7 +262,7 @@ async function adminRoutes(
       await updateRace(ctx, Number(r[1]), await body(request), actor);
       return json({ ok: true });
     }
-    return json(await raceDetail(db, Number(r[1]), now, { admin: true }));
+    return json(await adminRaceDetail(db, Number(r[1]), now));
   }
   r = m(/^\/api\/admin\/races\/(\d+)\/(calculate|recalculate|publish|overrides)$/);
   if (r && post) {
@@ -249,8 +270,8 @@ async function adminRoutes(
     if (r[2] === "calculate") return json(await calculateResults(ctx, raceId, actor));
     if (r[2] === "recalculate") return json(await recalculateRace(ctx, raceId, actor));
     if (r[2] === "publish") {
-      const b = await body<{ calcId: number; acknowledgeWarnings?: boolean }>(request);
-      await publish(ctx, raceId, Number(b.calcId), actor, Boolean(b.acknowledgeWarnings));
+      const b = await body<{ acknowledgeWarnings?: boolean }>(request);
+      await publish(ctx, raceId, actor, Boolean(b.acknowledgeWarnings));
       return json({ ok: true });
     }
     const b = await body<{ scope: "bird" | "fancier"; target: string; reason: string }>(request);

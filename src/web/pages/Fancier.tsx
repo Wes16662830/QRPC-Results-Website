@@ -9,15 +9,33 @@ export function FancierPage() {
   const { data, error } = useApi<FancierDetail>(`/api/fanciers/${id}`);
   if (error) return <ErrorBox error={error} />;
   if (!data) return <Loading />;
+  const main = data.standings[0];
+  const comps = data.competitions;
   return (
     <>
       <PageTitle title={data.fancier.name} sub={`${data.season} season`} />
       <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <Stat label="Championship" value={data.standing ? `${data.standing.rank} of ${data.standing.of}` : "–"} />
-        <Stat label="Points" value={data.standing?.total ?? 0} />
+        <Stat label={main?.competition.name ?? "Championship"} value={main?.rank ? `${main.rank} of ${main.of}` : "–"} />
+        <Stat label="Points" value={main?.total ?? 0} />
         <Stat label="Basketed / home" value={`${data.totals.basketed} / ${data.totals.returned}`} />
         <Stat label="Return" value={data.totals.returnPct === null ? "–" : `${data.totals.returnPct}%`} />
       </div>
+      {data.standings.length > 1 && (
+        <Card title="Competitions" className="mb-4">
+          <ul className="divide-y divide-line text-sm">
+            {data.standings.map((s) => (
+              <li key={s.competition.slug} className="flex justify-between py-2">
+                <Link to={`/championship?competition=${s.competition.slug}`} className="underline decoration-line underline-offset-2">
+                  {s.competition.name}
+                </Link>
+                <span>
+                  {s.rank ? `${s.rank} of ${s.of}` : "–"} · <strong>{s.total} pts</strong>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
       <Card title="Races">
         <TableWrap>
           <table className="data">
@@ -26,8 +44,12 @@ export function FancierPage() {
                 <th>Race</th>
                 <th className="num">Basketed</th>
                 <th className="num">Home</th>
-                <th>Scoring birds (place in full result → points)</th>
-                <th className="num">Points</th>
+                {comps.length === 1 && <th>Scoring birds (place → points)</th>}
+                {comps.map((c) => (
+                  <th key={c.slug} className="num">
+                    {comps.length === 1 ? "Points" : c.name.replace(/ championship$/i, "")}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
@@ -44,8 +66,19 @@ export function FancierPage() {
                   </td>
                   <td className="num">{r.basketed}</td>
                   <td className="num">{r.returned}</td>
-                  <td className="text-muted">{r.fiveBird ? r.fiveBird.birds.map((b) => `${b.benzingPosition}→${b.points}`).join(", ") || "none" : "not published"}</td>
-                  <td className="num font-semibold">{r.fiveBird ? r.fiveBird.score : "–"}</td>
+                  {comps.length === 1 && (
+                    <td className="text-muted">
+                      {(() => {
+                        const res = r.results[comps[0]!.slug];
+                        return res ? res.birds.map((b) => `${b.benzingPosition}→${b.points}`).join(", ") || "none" : "not published";
+                      })()}
+                    </td>
+                  )}
+                  {comps.map((c) => (
+                    <td key={c.slug} className="num font-semibold">
+                      {r.results[c.slug]?.score ?? "–"}
+                    </td>
+                  ))}
                 </tr>
               ))}
             </tbody>

@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import { handleApi } from "../src/server/api";
 import { setMemberPassword } from "../src/server/auth";
 import type { Env } from "../src/server/env";
-import { championship, live, raceDetail } from "../src/server/queries";
+import { adminRaceDetail, championship, live, raceDetail } from "../src/server/queries";
 import {
   addOverride, calculateResults, crossCheck, isLiveActive, pollLive, publish, recalculateRace,
-  revokeOverride, sastToUtc, syncRaces, updateRace, updateSettings, type Ctx, type StoredArrival,
+  revokeOverride, sastToUtc, syncRaces, updateCompetition, createCompetition, setCompetitionRace, updateRace, type Ctx, type StoredArrival,
 } from "../src/server/services";
 import { testDb } from "./helpers/d1";
 import { fakeBenzing } from "./helpers/fakeBenzing";
@@ -19,6 +19,10 @@ function setup(routes: Record<string, string | number> = {}, now = NOW) {
   const ctx: Ctx = { db, benzing: fake.client, now: () => now };
   return { db, fake, ctx };
 }
+
+type Detail = Awaited<ReturnType<typeof adminRaceDetail>>;
+const five = (d: Pick<Detail, "results">) => d.results.find((r) => r.competition.slug === "five-bird")!.published;
+const draftOf = (d: Pick<Detail, "results">, slug = "five-bird") => d.results.find((r) => r.competition.slug === slug)!.draft;
 
 async function mooiRiverId(ctx: Ctx) {
   await syncRaces(ctx, 2026, ADMIN);
@@ -57,24 +61,24 @@ describe("calculate → draft → publish (Mooi River acceptance, end to end)", 
     expect(res.changed).toBe(true);
     expect(res.warnings).toEqual([]);
 
-    const before = await raceDetail(db, raceId, NOW, { admin: false });
-    expect(before.fiveBird).toBeNull();
+    const before = await raceDetail(db, raceId, NOW);
+    expect(five(before)).toBeNull();
     expect(before.fullResult).toHaveLength(265);
     expect(before.entries.map((e) => [e.fancierName, e.basketed, e.returned])).toContainEqual(["Glenn Mcewan", 65, 61]);
 
-    const adminView = await raceDetail(db, raceId, NOW, { admin: true });
-    expect(adminView.draft!.fanciers.map((f) => [f.fancierName, f.score])).toEqual([
+    const adminView = await adminRaceDetail(db, raceId, NOW);
+    expect(draftOf(adminView)!.fanciers.map((f) => [f.fancierName, f.score])).toEqual([
       ["Glenn Mcewan", 122], ["Wesley Phillips", 115], ["Larry Elliott", 109], ["Scott King", 104],
       ["Theuns Van Schalkwyk", 47], ["Albert Venter", 16], ["Willie du Plessis", 15],
     ]);
-    expect(adminView.draft!.n).toBe(32);
+    expect(draftOf(adminView)!.n).toBe(32);
 
-    await publish(ctx, raceId, res.calcId, ADMIN, false);
-    const after = await raceDetail(db, raceId, NOW, { admin: false });
-    expect(after.fiveBird!.fanciers[0]).toMatchObject({ rank: 1, fancierName: "Glenn Mcewan", score: 122 });
+    await publish(ctx, raceId, ADMIN, false);
+    const after = await raceDetail(db, raceId, NOW);
+    expect(five(after)!.fanciers[0]).toMatchObject({ rank: 1, fancierName: "Glenn Mcewan", score: 122 });
     expect(after.firstBird).toMatchObject({ fancierName: "Wesley Phillips", speed: 1279.742 });
 
-    const champ = await championship(db, 2026);
+    const champ = await championship(db, null, 2026);
     expect(champ.standings.map((s) => [s.rank, s.fancierName, s.total])).toEqual([
       [1, "Glenn Mcewan", 122], [2, "Wesley Phillips", 115], [3, "Larry Elliott", 109], [4, "Scott King", 104],
       [5, "Theuns Van Schalkwyk", 47], [6, "Albert Venter", 16], [7, "Willie du Plessis", 15],
@@ -93,7 +97,8 @@ describe("calculate → draft → publish (Mooi River acceptance, end to end)", 
     const raceId = await mooiRiverId(ctx);
     const a = await calculateResults(ctx, raceId, ADMIN);
     const b = await calculateResults(ctx, raceId, ADMIN);
-    expect(b).toMatchObject({ calcId: a.calcId, changed: false });
+    expect(b.changed).toBe(false);
+    expect(b.drafts[0]!.calcId).toBe(a.drafts[0]!.calcId);
     expect((await db.prepare("SELECT COUNT(*) AS n FROM snapshot").first<{ n: number }>())!.n).toBe(1);
   });
 
@@ -111,7 +116,7 @@ describe("calculate → draft → publish (Mooi River acceptance, end to end)", 
     const broken = setup({ "/za/en/results/view/r-6975-t-17084-mooiriver/": "<html>maintenance</html>" });
     const ctx2: Ctx = { ...ctx, benzing: broken.fake.client };
     await expect(calculateResults(ctx2, raceId, ADMIN)).rejects.toThrow(/nothing was changed/);
-    expect((await raceDetail(db, raceId, NOW, { admin: false })).fullResult).toHaveLength(265);
+    expect((await raceDetail(db, raceId, NOW)).fullResult).toHaveLength(265);
     expect(((await db.prepare("SELECT message FROM alert WHERE source = 'calculate'").first<{ message: string }>())!.message)).toMatch(/table not found/);
   });
 
@@ -122,8 +127,8 @@ describe("calculate → draft → publish (Mooi River acceptance, end to end)", 
     const raceId = await mooiRiverId(ctx);
     const res = await calculateResults(ctx, raceId, ADMIN);
     expect(res.warnings[0]).toMatch(/speed .* on the sheet, 999.999 live/);
-    await expect(publish(ctx, raceId, res.calcId, ADMIN, false)).rejects.toThrow(/warnings/);
-    await publish(ctx, raceId, res.calcId, ADMIN, true);
+    await expect(publish(ctx, raceId, ADMIN, false)).rejects.toThrow(/warnings/);
+    await publish(ctx, raceId, ADMIN, true);
     expect((await db.prepare("SELECT COUNT(*) AS n FROM alert WHERE source = 'cross-check'").first<{ n: number }>())!.n).toBe(1);
   });
 });
@@ -133,28 +138,28 @@ describe("overrides (disqualified bird is removed, the fancier's next bird moves
     const { db, ctx } = setup();
     const raceId = await mooiRiverId(ctx);
     const first = await calculateResults(ctx, raceId, ADMIN);
-    await publish(ctx, raceId, first.calcId, ADMIN, false);
+    await publish(ctx, raceId, ADMIN, false);
 
     // Disqualify Glenn's first bird (5th in the full result).
-    const glennFirst = (await raceDetail(db, raceId, NOW, { admin: true })).fullResult[4]!;
+    const glennFirst = (await adminRaceDetail(db, raceId, NOW)).fullResult[4]!;
     expect(glennFirst.fancierName).toBe("Glenn Mcewan");
     await expect(addOverride(ctx, raceId, "bird", glennFirst.ring, " ", ADMIN)).rejects.toThrow(/reason/);
     await expect(addOverride(ctx, raceId, "bird", "ZA-0000-XX-1", "x", ADMIN)).rejects.toThrow(/not in this race/);
     await addOverride(ctx, raceId, "bird", glennFirst.ring, "Clocking error", ADMIN);
 
-    const view = await raceDetail(db, raceId, NOW, { admin: true });
-    expect(view.fiveBird!.fanciers[0]!.score).toBe(122); // published result unchanged until publish
-    const glenn = view.draft!.fanciers.find((f) => f.fancierName === "Glenn Mcewan")!;
+    const view = await adminRaceDetail(db, raceId, NOW);
+    expect(five(view)!.fanciers[0]!.score).toBe(122); // published result unchanged until publish
+    const glenn = draftOf(view)!.fanciers.find((f) => f.fancierName === "Glenn Mcewan")!;
     expect(glenn.birdsScored).toBe(5);
     expect(glenn.benzingPositions).toEqual([8, 9, 10, 11, 12]); // 12th bird moved up
-    expect(view.draft!.n).toBe(32);
-    expect(view.draft!.excluded[0]).toMatchObject({ ring: glennFirst.ring, reason: "Clocking error" });
+    expect(draftOf(view)!.n).toBe(32);
+    expect(draftOf(view)!.excluded[0]).toMatchObject({ ring: glennFirst.ring, reason: "Clocking error" });
 
     const overrideId = (view.overrides[0] as { id: number }).id;
     await revokeOverride(ctx, overrideId, ADMIN);
     await expect(revokeOverride(ctx, overrideId, ADMIN)).rejects.toThrow(/Already/);
-    const restored = await raceDetail(db, raceId, NOW, { admin: true });
-    expect(restored.draft!.fanciers[0]).toMatchObject({ fancierName: "Glenn Mcewan", score: 122 });
+    const restored = await adminRaceDetail(db, raceId, NOW);
+    expect(draftOf(restored)!.fanciers[0]).toMatchObject({ fancierName: "Glenn Mcewan", score: 122 });
   });
 
   it("disqualifying a fancier removes all their birds", async () => {
@@ -163,25 +168,59 @@ describe("overrides (disqualified bird is removed, the fancier's next bird moves
     await calculateResults(ctx, raceId, ADMIN);
     const willie = await db.prepare("SELECT id FROM fancier WHERE name = 'Willie du Plessis'").first<{ id: number }>();
     await addOverride(ctx, raceId, "fancier", String(willie!.id), "Late basketing", ADMIN);
-    const draft = (await raceDetail(db, raceId, NOW, { admin: true })).draft!;
+    const draft = draftOf(await adminRaceDetail(db, raceId, NOW))!;
     expect(draft.n).toBe(27);
     expect(draft.fanciers.map((f) => f.fancierName)).not.toContain("Willie du Plessis");
   });
 });
 
-describe("settings", () => {
+describe("competitions (multiple result systems)", () => {
+  it("a second competition is scored independently, published together, with its own standings and races", async () => {
+    const { db, ctx } = setup();
+    const raceId = await mooiRiverId(ctx);
+    await calculateResults(ctx, raceId, ADMIN);
+    const { slug } = await createCompetition(ctx, { name: "3-bird", system: "top-n-per-fancier", params: { scoringBirds: 3 } }, ADMIN, 2026);
+    expect(slug).toBe("3-bird");
+    await expect(createCompetition(ctx, { name: "3-bird", system: "top-n-per-fancier" }, ADMIN, 2026)).rejects.toThrow(/already exists/);
+    await expect(createCompetition(ctx, { name: "X", system: "nope" }, ADMIN, 2026)).rejects.toThrow(/Unknown scoring system/);
+
+    const view = await adminRaceDetail(db, raceId, NOW);
+    expect(view.results.map((r) => r.competition.slug)).toEqual(["five-bird", "3-bird"]);
+    const three = draftOf(view, "3-bird")!;
+    expect(three.n).toBe(20); // 6 fanciers × 3 + Albert's 2
+    expect(three.fanciers.every((f) => f.birdsScored <= 3)).toBe(true);
+
+    await publish(ctx, raceId, ADMIN, false);
+    const member = await raceDetail(db, raceId, NOW);
+    expect(member.results.every((r) => r.published !== null && r.draft === null)).toBe(true);
+    expect((await championship(db, "3-bird", 2026)).standings[0]!.total).toBe(three.fanciers[0]!.score);
+    expect((await championship(db, "five-bird", 2026)).standings[0]!.total).toBe(122);
+
+    // Leave Mooi River out of the 3-bird competition only.
+    const comp3 = (await championship(db, "3-bird", 2026)).competition.id;
+    await setCompetitionRace(ctx, comp3, raceId, false, ADMIN);
+    expect((await championship(db, "3-bird", 2026)).standings).toEqual([]);
+    expect((await championship(db, "five-bird", 2026)).standings).toHaveLength(7);
+    await setCompetitionRace(ctx, comp3, raceId, true, ADMIN);
+    expect((await championship(db, "3-bird", 2026)).standings).toHaveLength(7);
+
+    // Deactivated competitions disappear for members.
+    await updateCompetition(ctx, comp3, { active: false }, ADMIN, 2026);
+    expect((await raceDetail(db, raceId, NOW)).results.map((r) => r.competition.slug)).toEqual(["five-bird"]);
+  });
+
   it("changing scoring birds creates fresh drafts; recalc without changes does nothing", async () => {
     const { db, ctx } = setup();
     const raceId = await mooiRiverId(ctx);
     const first = await calculateResults(ctx, raceId, ADMIN);
-    await publish(ctx, raceId, first.calcId, ADMIN, false);
+    await publish(ctx, raceId, ADMIN, false);
     expect((await recalculateRace(ctx, raceId, ADMIN)).changed).toBe(false);
-    const drafts = await updateSettings(ctx, { scoringBirds: 3, racesCounted: "all", bestX: null }, ADMIN, 2026);
+    const drafts = await updateCompetition(ctx, 1, { params: { scoringBirds: 3 } }, ADMIN, 2026);
     expect(drafts).toEqual([{ raceId, changed: true }]);
-    const draft = (await raceDetail(db, raceId, NOW, { admin: true })).draft!;
+    const draft = draftOf(await adminRaceDetail(db, raceId, NOW))!;
     expect(draft.fanciers.every((f) => f.birdsScored <= 3)).toBe(true);
-    await expect(updateSettings(ctx, { scoringBirds: 0, racesCounted: "all", bestX: null }, ADMIN, 2026)).rejects.toThrow();
-    await expect(updateSettings(ctx, { scoringBirds: 5, racesCounted: "best", bestX: null }, ADMIN, 2026)).rejects.toThrow();
+    await expect(updateCompetition(ctx, 1, { params: { scoringBirds: 0 } }, ADMIN, 2026)).rejects.toThrow(/1 to 50/);
+    await expect(updateCompetition(ctx, 1, { racesCounted: "best", bestX: null }, ADMIN, 2026)).rejects.toThrow(/Best X/);
   });
 });
 
@@ -220,8 +259,8 @@ describe("live polling (every 5 minutes, only for an active race)", () => {
     expect((await db.prepare("SELECT COUNT(*) AS n FROM snapshot WHERE source = 'live'").first<{ n: number }>())!.n).toBe(1);
     const board = await live(db, raceDay);
     expect(board.races).toHaveLength(1);
-    expect(board.races[0]!.provisional.fanciers.map((f) => f.score)).toEqual([122, 115, 109, 104, 47, 16, 15]);
-    expect(board.races[0]!.provisional.fanciers[0]!.fancierName).toBe("Glenn Mcewan");
+    expect(board.races[0]!.provisional[0]!.result.fanciers.map((f) => f.score)).toEqual([122, 115, 109, 104, 47, 16, 15]);
+    expect(board.races[0]!.provisional[0]!.result.fanciers[0]!.fancierName).toBe("Glenn Mcewan");
   });
 
   it("alerts and keeps last good data when the live feed fails", async () => {
@@ -332,19 +371,23 @@ describe("HTTP API", () => {
     const fullText = await full.text();
     expect(fullText.split("\r\n")[1]).toBe("1,Wesley Phillips,ZA-2025-BORD-3404,14:28:13,1279.742,477.685,1/74");
     expect(fullText).toContain("Day 12 10:40:28");
-    const five = await (await call(`/api/races/${mooi.id}/five-bird.csv`, { cookie })).text();
+    const five = await (await call(`/api/races/${mooi.id}/result.csv?competition=five-bird`, { cookie })).text();
     expect(five).toContain("1,Glenn Mcewan,5,122");
     const wa = (await (await call(`/api/races/${mooi.id}/whatsapp`, { cookie })).json()) as { text: string };
     expect(wa.text).toContain("1. Glenn Mcewan – 122 pts");
-    expect(wa.text).toContain("*5-bird result* (32 scoring birds)");
+    expect(wa.text).toContain("*5-bird championship* (32 scoring birds)");
     const champCsv = await (await call("/api/championship/export.csv?season=2026", { cookie })).text();
     expect(champCsv).toContain("1,Glenn Mcewan,122,122");
 
     const glennId = (await db.prepare("SELECT id FROM fancier WHERE name = 'Glenn Mcewan'").first<{ id: number }>())!.id;
-    const fancier = (await (await call(`/api/fanciers/${glennId}?season=2026`, { cookie })).json()) as { totals: unknown; standing: unknown; races: { fiveBird: { score: number } }[] };
+    const fancier = (await (await call(`/api/fanciers/${glennId}?season=2026`, { cookie })).json()) as {
+      totals: unknown;
+      standings: { competition: { slug: string }; rank: number; total: number; of: number }[];
+      races: { results: Record<string, { score: number }> }[];
+    };
     expect(fancier.totals).toEqual({ basketed: 65, returned: 61, returnPct: 93.8 });
-    expect(fancier.standing).toEqual({ rank: 1, total: 122, of: 7 });
-    expect(fancier.races[0]!.fiveBird.score).toBe(122);
+    expect(fancier.standings[0]).toMatchObject({ competition: { slug: "five-bird" }, rank: 1, total: 122, of: 7 });
+    expect(fancier.races[0]!.results["five-bird"]!.score).toBe(122);
 
     // Members cannot reach admin data or write.
     expect((await call(`/api/races/${mooi.id}`, { cookie, method: "POST", body: "{}" })).status).toBe(404);

@@ -4,7 +4,8 @@
  */
 import { pickFullResult, type BenzingRace } from "../core/benzing/parseRaceList";
 import type { LiveArrival } from "../core/benzing/parseLiveArrivals";
-import { calculateRace, type Override, type RaceCalculation } from "../core/scoring/fiveBird";
+import type { Override, RaceCalculation } from "../core/scoring/fiveBird";
+import { getSystem } from "../core/scoring/systems";
 import { BenzingClient, BenzingError, type ClubRef } from "./benzingClient";
 import { CLUB_ID, type D1Database } from "./env";
 
@@ -50,20 +51,28 @@ export interface RaceRow {
   synced_at: string | null;
 }
 
-export interface SettingsRow {
+export interface CompetitionRow {
   id: number;
-  scoring_birds: number;
+  name: string;
+  slug: string;
+  system: string;
+  display_order: number;
+  active: number;
+  /** Latest version: */
+  version_id: number;
+  params_json: string;
   races_counted: "all" | "best";
   best_x: number | null;
-  created_at: string;
-  actor: string;
+  version_created_at: string;
+  version_actor: string;
 }
 
 export interface CalcRow {
   id: number;
   race_id: number;
   snapshot_id: number;
-  settings_version_id: number;
+  competition_id: number;
+  competition_version_id: number;
   overrides_json: string;
   result_json: string;
   inputs_sha256: string;
@@ -140,10 +149,27 @@ export async function getRace(db: D1Database, raceId: number): Promise<RaceRow> 
   return r;
 }
 
-export async function currentSettings(db: D1Database): Promise<SettingsRow> {
-  const s = await db.prepare("SELECT * FROM settings_version WHERE club_id = ? ORDER BY id DESC LIMIT 1").bind(CLUB_ID).first<SettingsRow>();
-  if (!s) throw new Error("No settings; run migrations");
-  return s;
+const COMPETITION_SQL = `SELECT c.id, c.name, c.slug, c.system, c.display_order, c.active,
+    v.id AS version_id, v.params_json, v.races_counted, v.best_x, v.created_at AS version_created_at, v.actor AS version_actor
+  FROM competition c JOIN competition_version v ON v.id = (SELECT MAX(id) FROM competition_version WHERE competition_id = c.id)
+  WHERE c.club_id = ?`;
+
+export async function competitions(db: D1Database, opts: { activeOnly?: boolean } = {}): Promise<CompetitionRow[]> {
+  const rows = await db.prepare(`${COMPETITION_SQL}${opts.activeOnly ? " AND c.active = 1" : ""} ORDER BY c.display_order, c.id`).bind(CLUB_ID).all<CompetitionRow>();
+  return rows.results;
+}
+
+export async function competition(db: D1Database, idOrSlug: number | string): Promise<CompetitionRow> {
+  const col = typeof idOrSlug === "number" ? "c.id" : "c.slug";
+  const c = await db.prepare(`${COMPETITION_SQL} AND ${col} = ?`).bind(CLUB_ID, idOrSlug).first<CompetitionRow>();
+  if (!c) throw new UserError("Competition not found", 404);
+  return c;
+}
+
+/** Races excluded from a competition (beyond race-level kind/included). */
+export async function competitionExclusions(db: D1Database, competitionId: number): Promise<Set<number>> {
+  const rows = await db.prepare("SELECT race_id FROM competition_exclusion WHERE competition_id = ?").bind(competitionId).all<{ race_id: number }>();
+  return new Set(rows.results.map((r) => r.race_id));
 }
 
 // ---------- sync race list (admin button) ----------
@@ -251,10 +277,11 @@ async function fancierIdsByName(db: D1Database): Promise<Map<string, number>> {
   return new Map(rows.results.map((r) => [r.name, r.id]));
 }
 
-/** Runs the engine on a stored sheet snapshot. Fancier key = our fancier id (as text). */
-export async function scoreSnapshot(db: D1Database, arrivals: readonly StoredArrival[], scoringBirds: number, overrides: readonly Override[]) {
+/** Runs a competition's scoring system on stored arrivals. Fancier key = our fancier id (as text). */
+export async function scoreSnapshot(db: D1Database, arrivals: readonly StoredArrival[], comp: Pick<CompetitionRow, "system" | "params_json">, overrides: readonly Override[]) {
   const ids = await fancierIdsByName(db);
-  return calculateRace(
+  const system = getSystem(comp.system);
+  return system.score(
     arrivals.map((a) => ({
       id: String(a.listOrder),
       fancierKey: String(ids.get(a.fancierName) ?? `name:${a.fancierName}`),
@@ -263,36 +290,35 @@ export async function scoreSnapshot(db: D1Database, arrivals: readonly StoredArr
       benzingPosition: a.position,
       listOrder: a.listOrder,
     })),
-    { scoringBirds },
+    system.parse(JSON.parse(comp.params_json)),
     overrides,
   );
 }
 
-/** Creates a new draft from the latest sheet snapshot, unless it would equal the current draft/published result. */
-async function createDraft(db: D1Database, race: RaceRow, actor: string, now: Date, warnings: string[]): Promise<{ calcId: number; changed: boolean }> {
+/** Creates a new draft for one competition from the latest sheet snapshot, unless nothing changed. */
+async function createDraft(db: D1Database, race: RaceRow, comp: CompetitionRow, actor: string, now: Date, warnings: string[]): Promise<{ competitionId: number; calcId: number; changed: boolean }> {
   const snap = await latestSnapshot(db, race.id, "sheet");
   if (!snap) throw new UserError("No result sheet stored for this race yet. Press Calculate results first.");
-  const settings = await currentSettings(db);
   const overrides = await activeOverrides(db, race.id);
   const engineOverrides = overrides.map(({ scope, target, reason }) => ({ scope, target, reason }));
   const arrivals = JSON.parse(snap.arrivals_json) as StoredArrival[];
-  const calc = await scoreSnapshot(db, arrivals, settings.scoring_birds, engineOverrides);
-  const inputsHash = await sha256(JSON.stringify({ snapshot: snap.content_sha256, scoringBirds: settings.scoring_birds, overrides: engineOverrides }));
+  const calc = await scoreSnapshot(db, arrivals, comp, engineOverrides);
+  const inputsHash = await sha256(JSON.stringify({ snapshot: snap.content_sha256, system: comp.system, params: comp.params_json, overrides: engineOverrides }));
 
   const latest = await db
-    .prepare("SELECT id, inputs_sha256, status FROM race_calc WHERE race_id = ? AND status IN ('draft','published') ORDER BY id DESC LIMIT 1")
-    .bind(race.id)
-    .first<{ id: number; inputs_sha256: string; status: string }>();
-  if (latest && latest.inputs_sha256 === inputsHash && warnings.length === 0) return { calcId: latest.id, changed: false };
+    .prepare("SELECT id, inputs_sha256 FROM race_calc WHERE race_id = ? AND competition_id = ? AND status IN ('draft','published') ORDER BY id DESC LIMIT 1")
+    .bind(race.id, comp.id)
+    .first<{ id: number; inputs_sha256: string }>();
+  if (latest && latest.inputs_sha256 === inputsHash && warnings.length === 0) return { competitionId: comp.id, calcId: latest.id, changed: false };
 
-  await db.prepare("UPDATE race_calc SET status = 'superseded' WHERE race_id = ? AND status = 'draft'").bind(race.id).run();
+  await db.prepare("UPDATE race_calc SET status = 'superseded' WHERE race_id = ? AND competition_id = ? AND status = 'draft'").bind(race.id, comp.id).run();
   const stored: StoredCalcResult = { ...calc, warnings };
   const res = await db
     .prepare(
-      `INSERT INTO race_calc (race_id, snapshot_id, settings_version_id, overrides_json, result_json, inputs_sha256, status, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?)`,
+      `INSERT INTO race_calc (race_id, competition_id, competition_version_id, snapshot_id, overrides_json, result_json, inputs_sha256, status, created_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)`,
     )
-    .bind(race.id, snap.id, settings.id, JSON.stringify(overrides), JSON.stringify(stored), inputsHash, iso(now), actor)
+    .bind(race.id, comp.id, comp.version_id, snap.id, JSON.stringify(overrides), JSON.stringify(stored), inputsHash, iso(now), actor)
     .run();
   const calcId = res.meta.last_row_id!;
   const stmts = calc.fanciers
@@ -301,11 +327,20 @@ async function createDraft(db: D1Database, race: RaceRow, actor: string, now: Da
       db.prepare("INSERT INTO race_calc_score (race_calc_id, fancier_id, birds_scored, score) VALUES (?, ?, ?, ?)").bind(calcId, Number(f.fancierKey), f.birdsScored, f.score),
     );
   if (stmts.length) await db.batch(stmts);
-  await audit(db, now, actor, "draft-created", "race", race.id, { calcId, n: calc.n, settingsVersion: settings.id, overrides: overrides.length, warnings });
-  return { calcId, changed: true };
+  await audit(db, now, actor, "draft-created", "race", race.id, { calcId, competition: comp.slug, n: calc.n, competitionVersion: comp.version_id, overrides: overrides.length, warnings });
+  return { competitionId: comp.id, calcId, changed: true };
 }
 
-export async function calculateResults(ctx: Ctx, raceId: number, actor: string): Promise<{ calcId: number; changed: boolean; warnings: string[] }> {
+/** Drafts for every active competition (or just one). */
+async function createDrafts(db: D1Database, race: RaceRow, actor: string, now: Date, warnings: string[], only?: number) {
+  const out = [];
+  for (const comp of await competitions(db, { activeOnly: true })) {
+    if (only === undefined || comp.id === only) out.push(await createDraft(db, race, comp, actor, now, warnings));
+  }
+  return out;
+}
+
+export async function calculateResults(ctx: Ctx, raceId: number, actor: string): Promise<{ drafts: { competitionId: number; calcId: number; changed: boolean }[]; changed: boolean; warnings: string[] }> {
   const now = ctx.now();
   let race = await getRace(ctx.db, raceId);
   const c = await club(ctx.db);
@@ -397,41 +432,41 @@ export async function calculateResults(ctx: Ctx, raceId: number, actor: string):
   await ctx.db.prepare("UPDATE race SET live_mode = 'off' WHERE id = ?").bind(race.id).run();
   await audit(ctx.db, now, actor, "calculate-results", "race", race.id, { arrivals: sheetArrivals.length, resultId: race.full_result_id });
   const blocking = warnings.filter((w) => !w.includes("Benzing does not name them"));
-  const { calcId, changed } = await createDraft(ctx.db, race, actor, now, blocking);
+  const drafts = await createDrafts(ctx.db, race, actor, now, blocking);
   if (blocking.length) await raiseAlert(ctx.db, now, "warning", "cross-check", `${race.name}: result sheet and live feed differ. Review before publishing.`, race.id);
-  return { calcId, changed, warnings };
+  return { drafts, changed: drafts.some((d) => d.changed), warnings };
 }
 
-export async function recalculateRace(ctx: Ctx, raceId: number, actor: string) {
+export async function recalculateRace(ctx: Ctx, raceId: number, actor: string, competitionId?: number) {
   const race = await getRace(ctx.db, raceId);
-  return createDraft(ctx.db, race, actor, ctx.now(), []);
+  const drafts = await createDrafts(ctx.db, race, actor, ctx.now(), [], competitionId);
+  return { drafts, changed: drafts.some((d) => d.changed) };
 }
 
-export async function recalculateSeason(ctx: Ctx, season: number, actor: string) {
+export async function recalculateSeason(ctx: Ctx, season: number, actor: string, competitionId?: number) {
   const races = await ctx.db
     .prepare("SELECT r.id FROM race r WHERE r.club_id = ? AND r.season = ? AND EXISTS (SELECT 1 FROM snapshot s WHERE s.race_id = r.id AND s.source = 'sheet') ORDER BY r.race_date")
     .bind(CLUB_ID, season)
     .all<{ id: number }>();
   const out: { raceId: number; changed: boolean }[] = [];
-  for (const r of races.results) out.push({ raceId: r.id, changed: (await recalculateRace(ctx, r.id, actor)).changed });
+  for (const r of races.results) out.push({ raceId: r.id, changed: (await recalculateRace(ctx, r.id, actor, competitionId)).changed });
   await audit(ctx.db, ctx.now(), actor, "recalculate-season", "season", season, out);
   return out;
 }
 
-export async function publish(ctx: Ctx, raceId: number, calcId: number, actor: string, acknowledgeWarnings: boolean) {
+/** Publishes every current draft for the race (one approval covers all competitions). */
+export async function publish(ctx: Ctx, raceId: number, actor: string, acknowledgeWarnings: boolean) {
   const now = ctx.now();
-  const calc = await ctx.db.prepare("SELECT * FROM race_calc WHERE id = ? AND race_id = ?").bind(calcId, raceId).first<CalcRow>();
-  if (!calc) throw new UserError("Calculation not found", 404);
-  if (calc.status !== "draft") throw new UserError(`This calculation is ${calc.status}, not a draft.`);
-  const result = JSON.parse(calc.result_json) as StoredCalcResult;
-  if (result.warnings.length && !acknowledgeWarnings) {
-    throw new UserError("This draft has warnings. Review them and confirm before publishing.", 409);
-  }
-  await ctx.db.batch([
-    ctx.db.prepare("UPDATE race_calc SET status = 'superseded' WHERE race_id = ? AND status = 'published'").bind(raceId),
-    ctx.db.prepare("UPDATE race_calc SET status = 'published', published_at = ?, published_by = ? WHERE id = ?").bind(iso(now), actor, calcId),
+  const drafts = await ctx.db.prepare("SELECT * FROM race_calc WHERE race_id = ? AND status = 'draft'").bind(raceId).all<CalcRow>();
+  if (drafts.results.length === 0) throw new UserError("There is no draft to publish.");
+  const warnings = [...new Set(drafts.results.flatMap((d) => (JSON.parse(d.result_json) as StoredCalcResult).warnings))];
+  if (warnings.length && !acknowledgeWarnings) throw new UserError("This draft has warnings. Review them and confirm before publishing.", 409);
+  const stmts = drafts.results.flatMap((d) => [
+    ctx.db.prepare("UPDATE race_calc SET status = 'superseded' WHERE race_id = ? AND competition_id = ? AND status = 'published'").bind(raceId, d.competition_id),
+    ctx.db.prepare("UPDATE race_calc SET status = 'published', published_at = ?, published_by = ? WHERE id = ?").bind(iso(now), actor, d.id),
   ]);
-  await audit(ctx.db, now, actor, "publish", "race", raceId, { calcId, warningsAcknowledged: result.warnings });
+  await ctx.db.batch(stmts);
+  await audit(ctx.db, now, actor, "publish", "race", raceId, { calcIds: drafts.results.map((d) => d.id), warningsAcknowledged: warnings });
 }
 
 export async function addOverride(ctx: Ctx, raceId: number, scope: "bird" | "fancier", target: string, reason: string, actor: string) {
@@ -477,19 +512,94 @@ export async function updateRace(ctx: Ctx, raceId: number, patch: { kind?: strin
   });
 }
 
-export async function updateSettings(ctx: Ctx, input: { scoringBirds: number; racesCounted: "all" | "best"; bestX: number | null }, actor: string, season: number) {
-  if (!Number.isInteger(input.scoringBirds) || input.scoringBirds < 1 || input.scoringBirds > 50) throw new UserError("Scoring birds must be 1–50.");
-  if (input.racesCounted === "best" && (!Number.isInteger(input.bestX) || input.bestX! < 1)) throw new UserError("Best X must be a positive whole number.");
-  const before = await currentSettings(ctx.db);
+export interface CompetitionInput {
+  name?: string;
+  params?: unknown;
+  racesCounted?: "all" | "best";
+  bestX?: number | null;
+  active?: boolean;
+  displayOrder?: number;
+}
+
+function validCounting(racesCounted: string, bestX: number | null | undefined) {
+  if (racesCounted !== "all" && racesCounted !== "best") throw new UserError("Races counted must be all or best.");
+  if (racesCounted === "best" && (!Number.isInteger(bestX) || bestX! < 1)) throw new UserError("Best X must be a positive whole number.");
+}
+
+/** New settings version for a competition. Parameter changes create fresh drafts for its stored races. */
+export async function updateCompetition(ctx: Ctx, competitionId: number, input: CompetitionInput, actor: string, season: number) {
+  const before = await competition(ctx.db, competitionId);
+  const system = getSystem(before.system);
   const now = ctx.now();
-  await ctx.db
-    .prepare("INSERT INTO settings_version (club_id, scoring_birds, races_counted, best_x, created_at, actor) VALUES (?, ?, ?, ?, ?, ?)")
-    .bind(CLUB_ID, input.scoringBirds, input.racesCounted, input.racesCounted === "best" ? input.bestX : null, iso(now), actor)
-    .run();
-  await audit(ctx.db, now, actor, "settings-update", "settings", undefined, { before, after: input });
-  // Scoring-bird changes alter every race result: create fresh drafts for admin to review and publish.
-  if (before.scoring_birds !== input.scoringBirds) return recalculateSeason(ctx, season, actor);
+  let params: Record<string, unknown>;
+  try {
+    params = input.params === undefined ? JSON.parse(before.params_json) : system.parse(input.params);
+  } catch (e) {
+    throw new UserError((e as Error).message);
+  }
+  const racesCounted = input.racesCounted ?? before.races_counted;
+  const bestX = racesCounted === "best" ? (input.bestX === undefined ? before.best_x : input.bestX) : null;
+  validCounting(racesCounted, bestX);
+  const name = input.name?.trim() || before.name;
+  const active = input.active === undefined ? before.active : input.active ? 1 : 0;
+  const order = input.displayOrder ?? before.display_order;
+  await ctx.db.prepare("UPDATE competition SET name = ?, active = ?, display_order = ? WHERE id = ?").bind(name, active, order, competitionId).run();
+  const paramsJson = JSON.stringify(params);
+  const versionChanged = paramsJson !== before.params_json || racesCounted !== before.races_counted || bestX !== before.best_x;
+  if (versionChanged) {
+    await ctx.db
+      .prepare("INSERT INTO competition_version (competition_id, params_json, races_counted, best_x, created_at, actor) VALUES (?, ?, ?, ?, ?, ?)")
+      .bind(competitionId, paramsJson, racesCounted, bestX, iso(now), actor)
+      .run();
+  }
+  await audit(ctx.db, now, actor, "competition-update", "competition", competitionId, {
+    before: { name: before.name, params: before.params_json, racesCounted: before.races_counted, bestX: before.best_x, active: before.active },
+    after: { name, params: paramsJson, racesCounted, bestX, active },
+  });
+  // Scoring changes alter race results: create fresh drafts for the admin to review and publish.
+  if (paramsJson !== before.params_json || (active && !before.active)) return recalculateSeason(ctx, season, actor, competitionId);
   return [];
+}
+
+export async function createCompetition(ctx: Ctx, input: { name: string; system: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null }, actor: string, season: number) {
+  const now = ctx.now();
+  let system;
+  let params;
+  try {
+    system = getSystem(input.system);
+    params = system.parse(input.params ?? system.defaults);
+  } catch (e) {
+    throw new UserError((e as Error).message);
+  }
+  const name = (input.name ?? "").trim();
+  if (!name) throw new UserError("Name is required.");
+  const racesCounted = input.racesCounted ?? "all";
+  const bestX = racesCounted === "best" ? input.bestX ?? null : null;
+  validCounting(racesCounted, bestX);
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "competition";
+  const taken = await ctx.db.prepare("SELECT 1 FROM competition WHERE club_id = ? AND slug = ?").bind(CLUB_ID, slug).first();
+  if (taken) throw new UserError("A competition with that name already exists.");
+  const maxOrder = await ctx.db.prepare("SELECT COALESCE(MAX(display_order), 0) AS m FROM competition WHERE club_id = ?").bind(CLUB_ID).first<{ m: number }>();
+  const res = await ctx.db
+    .prepare("INSERT INTO competition (club_id, name, slug, system, display_order, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)")
+    .bind(CLUB_ID, name, slug, system.id, (maxOrder?.m ?? 0) + 1, iso(now))
+    .run();
+  const id = res.meta.last_row_id!;
+  await ctx.db
+    .prepare("INSERT INTO competition_version (competition_id, params_json, races_counted, best_x, created_at, actor) VALUES (?, ?, ?, ?, ?, ?)")
+    .bind(id, JSON.stringify(params), racesCounted, bestX, iso(now), actor)
+    .run();
+  await audit(ctx.db, now, actor, "competition-create", "competition", id, { name, system: system.id, params, racesCounted, bestX });
+  await recalculateSeason(ctx, season, actor, id);
+  return { id, slug };
+}
+
+export async function setCompetitionRace(ctx: Ctx, competitionId: number, raceId: number, included: boolean, actor: string) {
+  await competition(ctx.db, competitionId);
+  await getRace(ctx.db, raceId);
+  if (included) await ctx.db.prepare("DELETE FROM competition_exclusion WHERE competition_id = ? AND race_id = ?").bind(competitionId, raceId).run();
+  else await ctx.db.prepare("INSERT OR IGNORE INTO competition_exclusion (competition_id, race_id) VALUES (?, ?)").bind(competitionId, raceId).run();
+  await audit(ctx.db, ctx.now(), actor, "competition-race", "competition", competitionId, { raceId, included });
 }
 
 // ---------- live (cron, every 5 minutes) ----------

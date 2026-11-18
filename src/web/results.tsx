@@ -1,16 +1,16 @@
 import { Fragment, useState } from "react";
 import { fmtArrival, fmtSpeed } from "./format";
-import type { FiveBird, FullRow, RaceDetail } from "./types";
+import type { Calc, FullRow, RaceDetail } from "./types";
 import { FancierLink, TableWrap } from "./ui";
 
-type Calc = Pick<FiveBird, "n" | "lines" | "fanciers" | "excluded">;
+type CalcView = Pick<Calc, "n" | "lines" | "fanciers" | "excluded">;
 
-export function FiveBirdResult({ calc, scoringBirds }: { calc: Calc; scoringBirds?: number }) {
+export function ScoreTable({ calc, rules }: { calc: CalcView; rules?: string }) {
   const [open, setOpen] = useState<string | null>(null);
   return (
     <>
       <p className="mb-3 text-sm text-muted">
-        {calc.n} scoring birds{scoringBirds ? ` (first ${scoringBirds} home per fancier)` : ""}. Fastest scoring bird gets {calc.n} points, slowest gets 1.
+        {calc.n} scoring birds. {rules}
       </p>
       <TableWrap>
         <table className="data">
@@ -70,7 +70,7 @@ export function FiveBirdResult({ calc, scoringBirds }: { calc: Calc; scoringBird
   );
 }
 
-export function ScoringBirds({ calc }: { calc: Calc }) {
+export function ScoringBirds({ calc }: { calc: CalcView }) {
   return (
     <TableWrap>
       <table className="data">
@@ -101,7 +101,7 @@ export function ScoringBirds({ calc }: { calc: Calc }) {
   );
 }
 
-export function FullResult({ rows, highlight }: { rows: FullRow[]; highlight?: Set<string> }) {
+export function FullResult({ rows, highlight, highlightLabel }: { rows: FullRow[]; highlight?: Set<string>; highlightLabel?: string }) {
   const [filter, setFilter] = useState("");
   const shown = filter ? rows.filter((r) => r.fancierName === filter) : rows;
   const fanciers = [...new Set(rows.map((r) => r.fancierName))].sort();
@@ -145,7 +145,7 @@ export function FullResult({ rows, highlight }: { rows: FullRow[]; highlight?: S
           </tbody>
         </table>
       </TableWrap>
-      {highlight && <p className="mt-2 text-xs text-muted">Highlighted birds are scoring birds in the 5-bird result.</p>}
+      {highlight && <p className="mt-2 text-xs text-muted">Highlighted birds are scoring birds in the {highlightLabel ?? "main"} result.</p>}
     </>
   );
 }

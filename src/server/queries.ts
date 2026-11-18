@@ -1,10 +1,34 @@
 /** Read models for the site. Members only ever see PUBLISHED 5-bird results. */
 import { calculateSeason } from "../core/scoring/fiveBird";
+import { getSystem } from "../core/scoring/systems";
 import { CLUB_ID, type D1Database } from "./env";
 import {
-  currentSettings, getRace, isLiveActive, sastDate, scoreSnapshot,
-  type CalcRow, type RaceRow, type StoredArrival, type StoredCalcResult,
+  competition as loadCompetition, competitionExclusions, competitions, getRace, isLiveActive, sastDate, scoreSnapshot,
+  type CalcRow, type CompetitionRow, type RaceRow, type StoredArrival, type StoredCalcResult,
 } from "./services";
+
+/** Public description of a competition. */
+export function competitionInfo(c: CompetitionRow) {
+  const system = getSystem(c.system);
+  const params = JSON.parse(c.params_json) as Record<string, unknown>;
+  return {
+    id: c.id,
+    name: c.name,
+    slug: c.slug,
+    system: c.system,
+    systemName: system.name,
+    params,
+    rules: system.describe(params),
+    racesCounted: c.races_counted,
+    bestX: c.best_x,
+    active: c.active === 1,
+    displayOrder: c.display_order,
+  };
+}
+
+export async function listCompetitions(db: D1Database, opts: { activeOnly?: boolean } = { activeOnly: true }) {
+  return (await competitions(db, opts)).map(competitionInfo);
+}
 
 export type RaceState = "upcoming" | "live" | "awaiting" | "draft" | "published";
 
@@ -114,7 +138,7 @@ function fullResult(arrivals: StoredArrival[]) {
   }));
 }
 
-export async function raceDetail(db: D1Database, raceId: number, now: Date, opts: { admin: boolean }) {
+async function buildRaceDetail(db: D1Database, raceId: number, now: Date, opts: { admin: boolean }) {
   const race = await getRace(db, raceId);
   const states = await raceStates(db, now);
   const names = await fancierNames(db);
@@ -131,8 +155,11 @@ export async function raceDetail(db: D1Database, raceId: number, now: Date, opts
     .all<{ fancier_id: number; name: string; basketed: number; returned: number }>();
   const basketedKnown = entries.results.reduce((s, e) => s + e.basketed, 0);
 
-  const loadCalc = async (status: "published" | "draft") => {
-    const c = await db.prepare("SELECT * FROM race_calc WHERE race_id = ? AND status = ? ORDER BY id DESC LIMIT 1").bind(raceId, status).first<CalcRow>();
+  const loadCalc = async (competitionId: number, status: "published" | "draft") => {
+    const c = await db
+      .prepare("SELECT * FROM race_calc WHERE race_id = ? AND competition_id = ? AND status = ? ORDER BY id DESC LIMIT 1")
+      .bind(raceId, competitionId, status)
+      .first<CalcRow>();
     if (!c) return null;
     const snapRow = await db.prepare("SELECT arrivals_json FROM snapshot WHERE id = ?").bind(c.snapshot_id).first<{ arrivals_json: string }>();
     const snapArrivals = snapRow ? (JSON.parse(snapRow.arrivals_json) as StoredArrival[]) : [];
@@ -141,11 +168,17 @@ export async function raceDetail(db: D1Database, raceId: number, now: Date, opts
       createdAt: c.created_at,
       createdBy: opts.admin ? c.created_by : undefined,
       publishedAt: c.published_at,
-      settingsVersionId: c.settings_version_id,
+      competitionVersionId: c.competition_version_id,
       ...decorateCalc(JSON.parse(c.result_json) as StoredCalcResult, names, snapArrivals),
     };
   };
-  const published = await loadCalc("published");
+  const comps = await competitions(db, { activeOnly: !opts.admin });
+  const results = [];
+  for (const comp of comps) {
+    const published = await loadCalc(comp.id, "published");
+    const draft = opts.admin ? await loadCalc(comp.id, "draft") : null;
+    results.push({ competition: competitionInfo(comp), published, draft });
+  }
 
   const first = arrivals[0];
   const last = arrivals.at(-1);
@@ -160,55 +193,69 @@ export async function raceDetail(db: D1Database, raceId: number, now: Date, opts
     entries: entries.results.map((e) => ({ fancierId: e.fancier_id, fancierName: e.name, basketed: e.basketed, returned: e.returned })),
     unaccountedBasketed: race.basketed_total !== null && sheet ? Math.max(0, race.basketed_total - basketedKnown) : 0,
     fullResult: fullResult(arrivals),
-    fiveBird: published,
+    results,
+    sourceUrl: opts.admin ? (sheet?.source_url ?? null) : null,
   };
-  if (!opts.admin) return detail;
+  return detail;
+}
 
+/** What members see: published results only. */
+export function raceDetail(db: D1Database, raceId: number, now: Date) {
+  return buildRaceDetail(db, raceId, now, { admin: false });
+}
+
+/** Admin view: adds drafts, disqualifications and the Benzing source. */
+export async function adminRaceDetail(db: D1Database, raceId: number, now: Date) {
+  const detail = await buildRaceDetail(db, raceId, now, { admin: true });
+  const race = await getRace(db, raceId);
   const overrides = await db
     .prepare("SELECT id, scope, target, reason, actor, created_at, revoked_at, revoked_by FROM override WHERE race_id = ? ORDER BY id DESC")
     .bind(raceId)
-    .all();
+    .all<{ id: number; scope: "bird" | "fancier"; target: string; reason: string; actor: string; created_at: string; revoked_at: string | null; revoked_by: string | null }>();
   return {
     ...detail,
-    draft: await loadCalc("draft"),
     overrides: overrides.results,
-    benzingResultUrl: sheet?.source_url ?? null,
-    resultTypes: race.results_json ? JSON.parse(race.results_json) : [],
+    benzingResultUrl: detail.sourceUrl,
+    resultTypes: race.results_json ? (JSON.parse(race.results_json) as { id: number; typeName: string; percentage: number; active: boolean }[]) : [],
     fullResultId: race.full_result_id,
   };
 }
 
-export async function championship(db: D1Database, season: number) {
-  const settings = await currentSettings(db);
-  const races = await db
-    .prepare(
-      `SELECT r.id, r.name, r.race_date, r.race_number, c.id AS calc_id FROM race r
-       JOIN race_calc c ON c.race_id = r.id AND c.status = 'published'
-       WHERE r.club_id = ? AND r.season = ? AND r.kind = 'race' AND r.included = 1
-       ORDER BY r.race_date, r.race_number`,
-    )
-    .bind(CLUB_ID, season)
-    .all<{ id: number; name: string; race_date: string; race_number: number | null; calc_id: number }>();
+/** Season standings for one competition, from PUBLISHED race results only. */
+export async function championship(db: D1Database, competitionRef: number | string | null, season: number) {
+  const comp = competitionRef === null ? (await competitions(db, { activeOnly: true }))[0]! : await loadCompetition(db, competitionRef);
+  const excluded = await competitionExclusions(db, comp.id);
+  const races = (
+    await db
+      .prepare(
+        `SELECT r.id, r.name, r.race_date, r.race_number, c.id AS calc_id FROM race r
+         JOIN race_calc c ON c.race_id = r.id AND c.status = 'published' AND c.competition_id = ?
+         WHERE r.club_id = ? AND r.season = ? AND r.kind = 'race' AND r.included = 1
+         ORDER BY r.race_date, r.race_number`,
+      )
+      .bind(comp.id, CLUB_ID, season)
+      .all<{ id: number; name: string; race_date: string; race_number: number | null; calc_id: number }>()
+  ).results.filter((r) => !excluded.has(r.id));
   const scores = await db
     .prepare(
       `SELECT s.race_calc_id, s.fancier_id, s.score FROM race_calc_score s
-       JOIN race_calc c ON c.id = s.race_calc_id AND c.status = 'published'
+       JOIN race_calc c ON c.id = s.race_calc_id AND c.status = 'published' AND c.competition_id = ?
        JOIN race r ON r.id = c.race_id WHERE r.club_id = ? AND r.season = ?`,
     )
-    .bind(CLUB_ID, season)
+    .bind(comp.id, CLUB_ID, season)
     .all<{ race_calc_id: number; fancier_id: number; score: number }>();
   const names = await fancierNames(db);
   const standings = calculateSeason(
-    races.results.map((r) => ({
+    races.map((r) => ({
       raceId: String(r.id),
       scores: scores.results.filter((s) => s.race_calc_id === r.calc_id).map((s) => ({ fancierKey: String(s.fancier_id), score: s.score })),
     })),
-    { racesCounted: settings.races_counted === "all" ? "all" : { best: settings.best_x ?? races.results.length } },
+    { racesCounted: comp.races_counted === "all" ? "all" : { best: comp.best_x ?? races.length } },
   );
   return {
     season,
-    settings: { scoringBirds: settings.scoring_birds, racesCounted: settings.races_counted, bestX: settings.best_x },
-    races: races.results.map((r) => ({ id: r.id, name: r.name, date: r.race_date, number: r.race_number })),
+    competition: competitionInfo(comp),
+    races: races.map((r) => ({ id: r.id, name: r.name, date: r.race_date, number: r.race_number })),
     standings: standings.map((s) => ({
       rank: s.rank,
       fancierId: Number(s.fancierKey),
@@ -225,37 +272,52 @@ export async function fancierDetail(db: D1Database, fancierId: number, season: n
   if (!f) return null;
   const rows = await db
     .prepare(
-      `SELECT r.id, r.name, r.race_date, r.kind, r.included, e.basketed, e.returned,
-              (SELECT c.id FROM race_calc c WHERE c.race_id = r.id AND c.status = 'published' ORDER BY c.id DESC LIMIT 1) AS calc_id
+      `SELECT r.id, r.name, r.race_date, r.kind, r.included, e.basketed, e.returned
        FROM race_entry e JOIN race r ON r.id = e.race_id
        WHERE e.fancier_id = ? AND r.season = ? ORDER BY r.race_date`,
     )
     .bind(fancierId, season)
-    .all<{ id: number; name: string; race_date: string; kind: string; included: number; basketed: number; returned: number; calc_id: number | null }>();
-  const races = [];
-  for (const r of rows.results) {
-    let fiveBird = null;
-    if (r.calc_id) {
-      const c = await db.prepare("SELECT result_json FROM race_calc WHERE id = ?").bind(r.calc_id).first<{ result_json: string }>();
-      const calc = JSON.parse(c!.result_json) as StoredCalcResult;
+    .all<{ id: number; name: string; race_date: string; kind: string; included: number; basketed: number; returned: number }>();
+  const comps = await competitions(db, { activeOnly: true });
+  const published = await db
+    .prepare(
+      `SELECT c.race_id, c.competition_id, c.result_json FROM race_calc c JOIN race r ON r.id = c.race_id
+       WHERE c.status = 'published' AND r.season = ? AND r.club_id = ?`,
+    )
+    .bind(season, CLUB_ID)
+    .all<{ race_id: number; competition_id: number; result_json: string }>();
+  const races = rows.results.map((r) => {
+    const perCompetition: Record<string, { score: number; n: number; birds: { ring: string; benzingPosition: number; scoringPosition: number; points: number }[] } | null> = {};
+    for (const comp of comps) {
+      const calcRow = published.results.find((p) => p.race_id === r.id && p.competition_id === comp.id);
+      if (!calcRow) {
+        perCompetition[comp.slug] = null;
+        continue;
+      }
+      const calc = JSON.parse(calcRow.result_json) as StoredCalcResult;
       const mine = calc.lines.filter((l) => l.fancierKey === String(fancierId));
-      fiveBird = {
+      perCompetition[comp.slug] = {
         score: mine.reduce((s, l) => s + l.points, 0),
-        birds: mine.map((l) => ({ ring: l.ring, benzingPosition: l.benzingPosition, scoringPosition: l.scoringPosition, points: l.points })),
         n: calc.n,
+        birds: mine.map((l) => ({ ring: l.ring, benzingPosition: l.benzingPosition, scoringPosition: l.scoringPosition, points: l.points })),
       };
     }
-    races.push({ raceId: r.id, name: r.name, date: r.race_date, kind: r.kind, included: r.included === 1, basketed: r.basketed, returned: r.returned, fiveBird });
+    return { raceId: r.id, name: r.name, date: r.race_date, kind: r.kind, included: r.included === 1, basketed: r.basketed, returned: r.returned, results: perCompetition };
+  });
+  const standings = [];
+  for (const comp of comps) {
+    const champ = await championship(db, comp.id, season);
+    const s = champ.standings.find((x) => x.fancierId === fancierId);
+    standings.push({ competition: competitionInfo(comp), rank: s?.rank ?? null, total: s?.total ?? 0, of: champ.standings.length });
   }
-  const champ = await championship(db, season);
-  const standing = champ.standings.find((s) => s.fancierId === fancierId) ?? null;
   const basketed = races.reduce((s, r) => s + r.basketed, 0);
   const returned = races.reduce((s, r) => s + r.returned, 0);
   return {
     fancier: f,
     season,
+    competitions: comps.map(competitionInfo),
     totals: { basketed, returned, returnPct: basketed ? Math.round((returned / basketed) * 1000) / 10 : null },
-    standing: standing ? { rank: standing.rank, total: standing.total, of: champ.standings.length } : null,
+    standings,
     races,
   };
 }
@@ -264,7 +326,7 @@ export async function fancierDetail(db: D1Database, fancierId: number, season: n
 export async function live(db: D1Database, now: Date) {
   const rows = await db.prepare("SELECT * FROM race WHERE club_id = ? AND live_mode != 'off'").bind(CLUB_ID).all<RaceRow>();
   const active = rows.results.filter((r) => isLiveActive(r, now));
-  const settings = await currentSettings(db);
+  const comps = await competitions(db, { activeOnly: true });
   const out = [];
   for (const race of active) {
     const snap = await db
@@ -272,16 +334,20 @@ export async function live(db: D1Database, now: Date) {
       .bind(race.id)
       .first<{ fetched_at: string; arrivals_json: string }>();
     const arrivals = snap ? (JSON.parse(snap.arrivals_json) as StoredArrival[]) : [];
-    // Provisional scoring keys on names: live fanciers may not have a row yet.
-    const calc = await scoreSnapshot(db, arrivals, settings.scoring_birds, []);
+    // Provisional scoring keys on names when a live fancier has no row yet.
     const names = new Map<string, string>([...(await fancierNames(db))]);
     for (const a of arrivals) names.set(`name:${a.fancierName}`, a.fancierName);
+    const provisional = [];
+    for (const comp of comps) {
+      const calc = await scoreSnapshot(db, arrivals, comp, []);
+      provisional.push({ competition: competitionInfo(comp), result: decorateCalc({ ...calc, warnings: [] }, names, arrivals) });
+    }
     out.push({
       race: raceSummary(race, "live"),
       lastPolledAt: race.live_last_polled_at,
       dataAsOf: snap?.fetched_at ?? null,
       arrivals: fullResult(arrivals),
-      provisional: decorateCalc({ ...calc, warnings: [] }, names, arrivals),
+      provisional,
     });
   }
   return { races: out, pollIntervalMinutes: 5 };
@@ -300,14 +366,21 @@ export async function home(db: D1Database, now: Date) {
     .prepare("SELECT * FROM race WHERE club_id = ? AND race_date >= ? ORDER BY race_date LIMIT 1")
     .bind(CLUB_ID, sastDate(now))
     .first<RaceRow>();
-  const champ = await championship(db, season);
-  const latestDetail = latest ? await raceDetail(db, latest.id, now, { admin: false }) : null;
+  const champ = await championship(db, null, season);
+  const latestDetail = latest ? await raceDetail(db, latest.id, now) : null;
   const liveNow = await live(db, now);
   return {
     season,
     latestRace: latestDetail
-      ? { race: latestDetail.race, returned: latestDetail.returned, top: latestDetail.fiveBird?.fanciers.slice(0, 5) ?? [], firstBird: latestDetail.firstBird }
+      ? {
+          race: latestDetail.race,
+          returned: latestDetail.returned,
+          competition: champ.competition,
+          top: latestDetail.results.find((r) => r.competition.id === champ.competition.id)?.published?.fanciers.slice(0, 5) ?? [],
+          firstBird: latestDetail.firstBird,
+        }
       : null,
+    competition: champ.competition,
     championshipTop5: champ.standings.slice(0, 5),
     racesCounted: champ.races.length,
     nextRace: next ? raceSummary(next, isLiveActive(next, now) ? "live" : "upcoming") : null,

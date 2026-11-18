@@ -56,7 +56,7 @@ export function HomePage() {
           )}
         </Card>
 
-        <Card title="Championship top 5" right={<Link to="/championship" className="text-sm text-muted underline">Full table</Link>}>
+        <Card title={`${data.competition.name}: top 5`} right={<Link to="/championship" className="text-sm text-muted underline">Full table</Link>}>
           {data.championshipTop5.length ? (
             <>
               <ol className="space-y-1.5">

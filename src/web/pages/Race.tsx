@@ -2,22 +2,24 @@ import { useState } from "react";
 import { useParams } from "react-router";
 import { fmtArrival, fmtDate, fmtDateTime, fmtKm, fmtSpeed } from "../format";
 import { useApi } from "../hooks";
-import { EntriesTable, FiveBirdResult, FullResult, ScoringBirds } from "../results";
+import { EntriesTable, ScoreTable, FullResult, ScoringBirds } from "../results";
 import { ExportBar } from "../share";
 import type { RaceDetail } from "../types";
 import { Card, ErrorBox, Loading, Notice, PageTitle, Stat, StateBadge, Tabs } from "../ui";
 
-type Tab = "five" | "full" | "details";
+type Tab = string; // competition slug, "full" or "details"
 
 export function RacePage() {
   const { id } = useParams();
   const { data, error } = useApi<RaceDetail>(`/api/races/${id}`);
-  const rules = useApi<{ scoringBirds: number }>("/api/rules");
-  const [tab, setTab] = useState<Tab>("five");
+  const [tab, setTab] = useState<Tab | null>(null);
   if (error) return <ErrorBox error={error} />;
   if (!data) return <Loading />;
   const { race } = data;
-  const scoring = new Set(data.fiveBird?.lines.map((l) => l.ring) ?? []);
+  const current = tab ?? data.results[0]?.competition.slug ?? "full";
+  const main = data.results[0]?.published;
+  const scoring = new Set(main?.lines.map((l) => l.ring) ?? []);
+  const compResult = data.results.find((r) => r.competition.slug === current);
 
   return (
     <>
@@ -37,38 +39,45 @@ export function RacePage() {
         <Stat label="Distance" value={fmtKm(race.minDistanceKm)} />
       </div>
 
-      <Tabs<Tab> value={tab} onChange={setTab} tabs={[["five", "5-bird result"], ["full", "Full result"], ["details", "Details"]]} />
+      <Tabs<Tab>
+        value={current}
+        onChange={setTab}
+        tabs={[...data.results.map((r): [string, string] => [r.competition.slug, r.competition.name.replace(/ championship$/i, "")]), ["full", "Full result"], ["details", "Details"]]}
+      />
 
-      {tab === "five" && (
+      {compResult && (
         <Card>
-          {data.fiveBird ? (
+          {compResult.published ? (
             <>
-              <ExportBar csv={[[`/api/races/${race.id}/five-bird.csv`, "CSV"]]} whatsappPath={`/api/races/${race.id}/whatsapp`} />
-              <FiveBirdResult calc={data.fiveBird} scoringBirds={rules.data?.scoringBirds} />
+              <ExportBar
+                csv={[[`/api/races/${race.id}/result.csv?competition=${compResult.competition.slug}`, "CSV"]]}
+                whatsappPath={`/api/races/${race.id}/whatsapp?competition=${compResult.competition.slug}`}
+              />
+              <ScoreTable calc={compResult.published} rules={compResult.competition.rules} />
               <details className="mt-4">
-                <summary className="cursor-pointer text-sm font-semibold">All {data.fiveBird.n} scoring birds</summary>
+                <summary className="cursor-pointer text-sm font-semibold">All {compResult.published.n} scoring birds</summary>
                 <div className="mt-3">
-                  <ScoringBirds calc={data.fiveBird} />
+                  <ScoringBirds calc={compResult.published} />
                 </div>
               </details>
-              <p className="mt-4 text-xs text-muted">Published {fmtDateTime(data.fiveBird.publishedAt)}.</p>
+              <p className="mt-4 text-xs text-muted">Published {fmtDateTime(compResult.published.publishedAt)}.</p>
             </>
           ) : (
             <Notice tone="info">
               {race.state === "draft"
-                ? "The 5-bird result is being checked by the club and will appear here once published."
-                : "The 5-bird result will appear here after the race has been evaluated and published."}
+                ? `The ${compResult.competition.name} result is being checked by the club and will appear here once published.`
+                : `The ${compResult.competition.name} result will appear here after the race has been evaluated and published.`}
             </Notice>
           )}
         </Card>
       )}
 
-      {tab === "full" && (
+      {current === "full" && (
         <Card>
           {data.fullResult.length ? (
             <>
               <ExportBar csv={[[`/api/races/${race.id}/full.csv`, "CSV"]]} />
-              <FullResult rows={data.fullResult} highlight={scoring.size ? scoring : undefined} />
+              <FullResult rows={data.fullResult} highlight={scoring.size ? scoring : undefined} highlightLabel={data.results[0]?.competition.name} />
             </>
           ) : (
             <Notice tone="info">The full result has not been imported yet.</Notice>
@@ -76,7 +85,7 @@ export function RacePage() {
         </Card>
       )}
 
-      {tab === "details" && (
+      {current === "details" && (
         <div className="grid gap-4 md:grid-cols-2">
           <Card title="Race details">
             <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">

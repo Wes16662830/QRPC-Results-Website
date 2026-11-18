@@ -3,8 +3,8 @@ import { Link, NavLink, Route, Routes, useParams } from "react-router";
 import { post } from "../api";
 import { fmtDate, fmtDateTime } from "../format";
 import { useApi } from "../hooks";
-import { FiveBirdResult } from "../results";
-import type { AdminRaceDetail, RaceSummary } from "../types";
+import { ScoreTable } from "../results";
+import type { AdminRaceDetail, CompetitionInfo, RaceSummary } from "../types";
 import { Card, ErrorBox, Loading, Notice, PageTitle, StateBadge, TableWrap } from "../ui";
 
 interface Overview {
@@ -251,7 +251,9 @@ function AdminRace() {
   const [dq, setDq] = useState({ scope: "bird" as "bird" | "fancier", target: "", reason: "" });
   if (error) return <ErrorBox error={error} />;
   if (!data) return <Loading />;
-  const { race, draft } = data;
+  const { race } = data;
+  const drafts = data.results.filter((r) => r.draft);
+  const warnings = [...new Set(drafts.flatMap((r) => r.draft!.warnings))];
   const act = (fn: () => Promise<unknown>, ok: string | ((r: unknown) => string)) => action.run(async () => {
     const r = await fn();
     await reload();
@@ -296,14 +298,14 @@ function AdminRace() {
         {data.benzingRecalculated && ` · Benzing recalculated ${data.benzingRecalculated}`}
       </p>
 
-      {draft ? (
-        <Card title="Draft – not visible to members" className="mb-4 border-accent">
-          {draft.warnings.length > 0 && (
+      {drafts.length > 0 && (
+        <Card title="Drafts – not visible to members" className="mb-4 border-accent">
+          {warnings.length > 0 && (
             <div className="mb-3">
               <Notice>
                 <strong>Check before publishing:</strong>
                 <ul className="mt-1 list-disc pl-5">
-                  {draft.warnings.map((w) => (
+                  {warnings.map((w) => (
                     <li key={w}>{w}</li>
                   ))}
                 </ul>
@@ -313,21 +315,28 @@ function AdminRace() {
               </label>
             </div>
           )}
-          <FiveBirdResult calc={draft} />
+          {drafts.map((r) => (
+            <div key={r.competition.slug} className="mb-5">
+              <h3 className="mb-2 font-semibold">{r.competition.name}</h3>
+              <ScoreTable calc={r.draft!} rules={r.competition.rules} />
+            </div>
+          ))}
           <button
-            className="btn btn-primary mt-4"
-            disabled={action.busy || (draft.warnings.length > 0 && !ack)}
-            onClick={() => act(() => post(`/api/admin/races/${race.id}/publish`, { calcId: draft.id, acknowledgeWarnings: ack }), "Published. Members can now see this result.")}
+            className="btn btn-primary"
+            disabled={action.busy || (warnings.length > 0 && !ack)}
+            onClick={() => act(() => post(`/api/admin/races/${race.id}/publish`, { acknowledgeWarnings: ack }), "Published. Members can now see these results.")}
           >
-            Publish
+            Publish {drafts.length > 1 ? `all ${drafts.length} results` : ""}
           </button>
-          {data.fiveBird && <p className="mt-2 text-xs text-muted">Publishing replaces the result currently shown to members.</p>}
+          {data.results.some((r) => r.draft && r.published) && <p className="mt-2 text-xs text-muted">Publishing replaces the results currently shown to members.</p>}
         </Card>
-      ) : null}
+      )}
 
-      <Card title="Published result" className="mb-4">
-        {data.fiveBird ? <FiveBirdResult calc={data.fiveBird} /> : <p className="text-sm text-muted">Nothing published yet.</p>}
-      </Card>
+      {data.results.map((r) => (
+        <Card key={r.competition.slug} title={`Published: ${r.competition.name}${r.competition.active ? "" : " (inactive)"}`} className="mb-4">
+          {r.published ? <ScoreTable calc={r.published} /> : <p className="text-sm text-muted">Nothing published yet.</p>}
+        </Card>
+      ))}
 
       <Card title="Disqualifications" className="mb-4">
         <p className="mb-3 text-sm text-muted">The bird (or all of a fancier's birds) is removed before scoring, so that fancier's next bird moves up. A new draft is created for you to publish.</p>
@@ -391,77 +400,196 @@ function AdminRace() {
   );
 }
 
-function SettingsPage({ season, passwordSet }: { season: number; passwordSet: boolean }) {
-  const { data, reload } = useApi<{ scoringBirds: number; racesCounted: "all" | "best"; bestX: number | null; updatedAt: string; updatedBy: string }>("/api/admin/settings");
-  const [form, setForm] = useState<{ scoringBirds: number; racesCounted: "all" | "best"; bestX: number | null } | null>(null);
-  const [pw, setPw] = useState("");
+interface AdminCompetition extends CompetitionInfo {
+  excludedRaceIds: number[];
+}
+interface SystemInfo {
+  id: string;
+  name: string;
+  fields: { key: string; label: string; type: "integer"; min: number; max: number }[];
+  defaults: Record<string, unknown>;
+}
+
+function CompetitionEditor({ comp, systems, races, season, onSaved }: { comp: AdminCompetition; systems: SystemInfo[]; races: RaceSummary[]; season: number; onSaved: () => void }) {
+  const system = systems.find((s) => s.id === comp.system);
+  const [name, setName] = useState(comp.name);
+  const [params, setParams] = useState<Record<string, unknown>>(comp.params);
+  const [racesCounted, setRacesCounted] = useState(comp.racesCounted);
+  const [bestX, setBestX] = useState<number | null>(comp.bestX);
   const save = useAction();
+  const raceAction = useAction();
+  return (
+    <Card title={comp.name} right={<span className="text-xs text-muted">{comp.systemName}</span>} className="mb-4">
+      <form
+        className="grid gap-3 text-sm sm:grid-cols-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void save.run(async () => {
+            const r = await post<{ newDrafts: number }>(`/api/admin/competitions/${comp.id}`, { name, params, racesCounted, bestX, season });
+            onSaved();
+            return r;
+          }, (r) => {
+            const n = (r as { newDrafts: number }).newDrafts;
+            return n ? `Saved. ${n} race(s) have new drafts to review and publish.` : "Saved.";
+          });
+        }}
+      >
+        <label className="block">
+          Name
+          <input className="input mt-1" value={name} onChange={(e) => setName(e.target.value)} />
+        </label>
+        {system?.fields.map((f) => (
+          <label key={f.key} className="block">
+            {f.label}
+            <input className="input mt-1" type="number" min={f.min} max={f.max} value={String(params[f.key] ?? "")} onChange={(e) => setParams({ ...params, [f.key]: Number(e.target.value) })} />
+          </label>
+        ))}
+        <label className="block">
+          Races counted
+          <select className="input mt-1" value={racesCounted} onChange={(e) => setRacesCounted(e.target.value as "all" | "best")}>
+            <option value="all">All included races</option>
+            <option value="best">Best X races per fancier</option>
+          </select>
+        </label>
+        {racesCounted === "best" && (
+          <label className="block">
+            X (best races counted)
+            <input className="input mt-1" type="number" min={1} value={bestX ?? ""} onChange={(e) => setBestX(Number(e.target.value) || null)} />
+          </label>
+        )}
+        <div className="flex flex-wrap items-center gap-2 sm:col-span-2">
+          <button className="btn btn-primary" disabled={save.busy}>
+            Save
+          </button>
+          <button
+            type="button"
+            className="btn"
+            disabled={save.busy}
+            onClick={() => save.run(async () => {
+              await post(`/api/admin/competitions/${comp.id}`, { active: !comp.active, season });
+              onSaved();
+            }, comp.active ? "Deactivated: hidden from members." : "Activated.")}
+          >
+            {comp.active ? "Deactivate" : "Activate"}
+          </button>
+        </div>
+        {save.view}
+      </form>
+      {races.length > 0 && (
+        <details className="mt-4 text-sm">
+          <summary className="cursor-pointer font-semibold">Races in this competition</summary>
+          <ul className="mt-2 grid gap-1 sm:grid-cols-2">
+            {races
+              .filter((r) => r.kind === "race")
+              .map((r) => (
+                <li key={r.id}>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={r.included && !comp.excludedRaceIds.includes(r.id)}
+                      disabled={!r.included || raceAction.busy}
+                      onChange={(e) => raceAction.run(async () => {
+                        await post(`/api/admin/competitions/${comp.id}/races/${r.id}`, { included: e.target.checked });
+                        onSaved();
+                      }, "Updated.")}
+                    />
+                    {r.name} <span className="text-muted">{fmtDate(r.date)}</span>
+                    {!r.included && <span className="text-xs text-muted">(excluded on Races tab)</span>}
+                  </label>
+                </li>
+              ))}
+          </ul>
+          {raceAction.view}
+        </details>
+      )}
+    </Card>
+  );
+}
+
+function NewCompetition({ systems, season, onCreated }: { systems: SystemInfo[]; season: number; onCreated: () => void }) {
+  const [name, setName] = useState("");
+  const [systemId, setSystemId] = useState(systems[0]?.id ?? "");
+  const system = systems.find((s) => s.id === systemId);
+  const [params, setParams] = useState<Record<string, unknown>>(system?.defaults ?? {});
+  const create = useAction();
+  return (
+    <Card title="Add a competition">
+      <form
+        className="grid gap-3 text-sm sm:grid-cols-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void create.run(async () => {
+            await post("/api/admin/competitions", { name, system: systemId, params, season });
+            setName("");
+            onCreated();
+          }, "Created. Drafts were made for every race with stored results. Review and publish them.");
+        }}
+      >
+        <label className="block">
+          Name
+          <input className="input mt-1" placeholder="e.g. 3-bird championship" value={name} onChange={(e) => setName(e.target.value)} />
+        </label>
+        <label className="block">
+          Result / point system
+          <select className="input mt-1" value={systemId} onChange={(e) => { setSystemId(e.target.value); setParams(systems.find((s) => s.id === e.target.value)?.defaults ?? {}); }}>
+            {systems.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        {system?.fields.map((f) => (
+          <label key={f.key} className="block">
+            {f.label}
+            <input className="input mt-1" type="number" min={f.min} max={f.max} value={String(params[f.key] ?? "")} onChange={(e) => setParams({ ...params, [f.key]: Number(e.target.value) })} />
+          </label>
+        ))}
+        <div className="sm:col-span-2">
+          <button className="btn btn-primary" disabled={create.busy || !name.trim()}>
+            Add competition
+          </button>
+          {create.view}
+        </div>
+      </form>
+      <p className="mt-3 text-xs text-muted">New point systems are added in code (src/core/scoring/systems.ts) and then appear in this list.</p>
+    </Card>
+  );
+}
+
+function SettingsPage({ season, passwordSet }: { season: number; passwordSet: boolean }) {
+  const comps = useApi<{ competitions: AdminCompetition[]; systems: SystemInfo[] }>("/api/admin/competitions");
+  const races = useApi<RaceSummary[]>(`/api/admin/races?season=${season}`);
+  const [pw, setPw] = useState("");
   const pwAction = useAction();
-  if (!data) return <Loading />;
-  const f = form ?? { scoringBirds: data.scoringBirds, racesCounted: data.racesCounted, bestX: data.bestX };
+  if (!comps.data) return <Loading />;
   return (
     <>
       <PageTitle title="Settings" />
-      <div className="grid gap-4 md:grid-cols-2">
-        <Card title="Championship rules">
-          <form
-            className="space-y-3 text-sm"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void save.run(async () => {
-                const r = await post<{ newDrafts: number }>("/api/admin/settings", { ...f, season });
-                setForm(null);
-                await reload();
-                return r;
-              }, (r) => {
-                const n = (r as { newDrafts: number }).newDrafts;
-                return n ? `Saved. ${n} race(s) have new drafts to review and publish.` : "Saved.";
-              });
-            }}
-          >
-            <label className="block">
-              Scoring birds per fancier
-              <input className="input mt-1" type="number" min={1} max={50} value={f.scoringBirds} onChange={(e) => setForm({ ...f, scoringBirds: Number(e.target.value) })} />
-            </label>
-            <label className="block">
-              Races counted
-              <select className="input mt-1" value={f.racesCounted} onChange={(e) => setForm({ ...f, racesCounted: e.target.value as "all" | "best" })}>
-                <option value="all">All included races</option>
-                <option value="best">Best X races per fancier</option>
-              </select>
-            </label>
-            {f.racesCounted === "best" && (
-              <label className="block">
-                X (best races counted)
-                <input className="input mt-1" type="number" min={1} value={f.bestX ?? ""} onChange={(e) => setForm({ ...f, bestX: Number(e.target.value) || null })} />
-              </label>
-            )}
-            <p className="text-xs text-muted">
-              Tie rule: no shared places for birds (Benzing's order decides exact ties); fanciers on equal season totals share a place. Last changed {fmtDateTime(data.updatedAt)} by {data.updatedBy}.
-            </p>
-            <button className="btn btn-primary" disabled={save.busy}>
-              Save rules
-            </button>
-            {save.view}
-          </form>
-        </Card>
-        <Card title="Club password">
-          <p className="mb-3 text-sm text-muted">{passwordSet ? "Members share one password. Changing it signs everyone out." : "Not set yet: members can't sign in."}</p>
-          <form
-            className="flex gap-2"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void pwAction.run(() => post("/api/admin/member-password", { password: pw }), "Password changed. Share the new one with members.").then((r) => r && setPw(""));
-            }}
-          >
-            <input className="input" type="text" autoComplete="off" placeholder="New club password (8+ characters)" value={pw} onChange={(e) => setPw(e.target.value)} />
-            <button className="btn btn-primary" disabled={pwAction.busy || pw.length < 8}>
-              Set
-            </button>
-          </form>
-          {pwAction.view}
-        </Card>
-      </div>
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted">Competitions</h2>
+      {comps.data.competitions.map((c) => (
+        <CompetitionEditor key={`${c.id}-${c.name}-${JSON.stringify(c.params)}-${c.racesCounted}-${c.bestX}`} comp={c} systems={comps.data!.systems} races={races.data ?? []} season={season} onSaved={() => comps.reload()} />
+      ))}
+      <NewCompetition systems={comps.data.systems} season={season} onCreated={() => comps.reload()} />
+      <p className="mt-2 mb-6 text-xs text-muted">Tie rules: no shared places for birds (Benzing's order decides exact ties); fanciers on equal season totals share a place.</p>
+
+      <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted">Members</h2>
+      <Card title="Club password">
+        <p className="mb-3 text-sm text-muted">{passwordSet ? "Members share one password. Changing it signs everyone out." : "Not set yet: members can't sign in."}</p>
+        <form
+          className="flex gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void pwAction.run(() => post("/api/admin/member-password", { password: pw }), "Password changed. Share the new one with members.").then((r) => r && setPw(""));
+          }}
+        >
+          <input className="input" type="text" autoComplete="off" placeholder="New club password (8+ characters)" value={pw} onChange={(e) => setPw(e.target.value)} />
+          <button className="btn btn-primary" disabled={pwAction.busy || pw.length < 8}>
+            Set
+          </button>
+        </form>
+        {pwAction.view}
+      </Card>
     </>
   );
 }
