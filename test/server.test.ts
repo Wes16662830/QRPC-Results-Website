@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { handleApi } from "../src/server/api";
 import { setMemberPassword } from "../src/server/auth";
@@ -283,6 +284,31 @@ describe("competitions (multiple result systems)", () => {
     expect((await recalculateRace(ctx, raceId, ADMIN, wId)).drafts[0]).toMatchObject({ skipped: expect.stringMatching(/default closing time/) });
   });
 
+  it("best bird: the season's first race with results sets the points for every race", async () => {
+    const m1 = readFileSync(new URL("../fixtures/benzing/r-6429-t-17076-matatiele-1.html", import.meta.url), "utf8");
+    const { db, ctx } = setup({ "/za/en/results/view/r-6429-t-17076-matatiele-1/": m1 });
+    const mooi = await mooiRiverId(ctx);
+    const mat1 = (await db.prepare("SELECT id FROM race WHERE benzing_race_id = 6429").first<{ id: number }>())!.id;
+    const birdLines = async (raceId: number) => draftOf(await adminRaceDetail(db, raceId, NOW), "best-bird")!.lines;
+
+    // Mooi River alone: it is its own base (265 home).
+    await calculateResults(ctx, mooi, ADMIN);
+    expect((await birdLines(mooi))[0]!.points).toBe(265);
+
+    // Matatiele 1 (6 June, 322 home) is earlier, so once it has results it becomes the base.
+    await calculateResults(ctx, mat1, ADMIN);
+    const m1Lines = await birdLines(mat1);
+    expect(m1Lines).toHaveLength(322);
+    expect([m1Lines[0]!.points, m1Lines[1]!.points, m1Lines.at(-1)!.points]).toEqual([322, 321, 1]);
+
+    // Mooi River must be recalculated to pick up the new base: 1st = 322, its last (265th) bird = 58.
+    expect((await recalculateRace(ctx, mooi, ADMIN)).changed).toBe(true);
+    const mr = await birdLines(mooi);
+    expect([mr[0]!.points, mr[9]!.points, mr.at(-1)!.points]).toEqual([322, 313, 58]);
+    // A win is a win: the first bird scores the same in both races.
+    expect(mr[0]!.points).toBe(m1Lines[0]!.points);
+  });
+
   it("best bird, distance bands, wins and top 25 %: standings by bird, by count and by season ratio", async () => {
     const { db, ctx } = setup();
     const raceId = await mooiRiverId(ctx);
@@ -291,7 +317,8 @@ describe("competitions (multiple result systems)", () => {
 
     const best = await championship(db, "best-bird", 2026);
     expect(best.competition).toMatchObject({ entity: "bird", unit: "Points" });
-    expect(best.standings[0]).toMatchObject({ rank: 1, ring: "ZA-2025-BORD-3404", fancierName: "Wesley Phillips", total: 100, racesScored: 1 });
+    // Only Mooi River has results here, so it is the base race: 265 birds home, 1st = 265 … 265th = 1.
+    expect(best.standings[0]).toMatchObject({ rank: 1, ring: "ZA-2025-BORD-3404", fancierName: "Wesley Phillips", total: 265, racesScored: 1 });
     expect(best.standings).toHaveLength(265);
 
     const w = await championship(db, "wins", 2026);
@@ -310,7 +337,7 @@ describe("competitions (multiple result systems)", () => {
     const picked = await setCompetitionRace(ctx, shortId, raceId, true, ADMIN);
     expect(picked.changed).toBe(true);
     await publish(ctx, raceId, ADMIN, false);
-    expect((await championship(db, "best-short-bird", 2026)).standings[0]).toMatchObject({ ring: "ZA-2025-BORD-3404", total: 100 });
+    expect((await championship(db, "best-short-bird", 2026)).standings[0]).toMatchObject({ ring: "ZA-2025-BORD-3404", total: 265 });
     expect((await raceDetail(db, raceId, NOW)).results.map((r) => r.competition.slug)).toContain("best-short-bird");
     await setCompetitionRace(ctx, shortId, raceId, false, ADMIN);
     expect((await championship(db, "best-short-bird", 2026)).standings).toEqual([]);
@@ -498,13 +525,13 @@ describe("HTTP API", () => {
     expect(champCsv).toContain("1,Glenn Mcewan,122,122");
     const birdCsv = await (await call("/api/championship/export.csv?season=2026&competition=best-bird", { cookie })).text();
     expect(birdCsv.split("\r\n")[0]).toBe("Place,Ring,Fancier,MooiRiver,Total (Points)");
-    expect(birdCsv).toContain("1,ZA-2025-BORD-3404,Wesley Phillips,100,100");
+    expect(birdCsv).toContain("1,ZA-2025-BORD-3404,Wesley Phillips,265,265");
     const birdWa = (await (await call("/api/championship/whatsapp?season=2026&competition=best-bird", { cookie })).json()) as { text: string };
-    expect(birdWa.text).toContain("1. ZA-2025-BORD-3404 (Wesley Phillips) – 100 pts");
+    expect(birdWa.text).toContain("1. ZA-2025-BORD-3404 (Wesley Phillips) – 265 pts");
     const topWa = (await (await call("/api/championship/whatsapp?season=2026&competition=top-25", { cookie })).json()) as { text: string };
     expect(topWa.text).toContain("1. Scott King – 36.14%");
     const raceBirdWa = (await (await call(`/api/races/${mooi.id}/whatsapp?competition=best-bird`, { cookie })).json()) as { text: string };
-    expect(raceBirdWa.text).toContain("1. ZA-2025-BORD-3404 (Wesley Phillips) – 100 pts");
+    expect(raceBirdWa.text).toContain("1. ZA-2025-BORD-3404 (Wesley Phillips) – 265 pts");
     const winsWa = (await (await call(`/api/races/${mooi.id}/whatsapp?competition=wins`, { cookie })).json()) as { text: string };
     expect(winsWa.text).toContain("1. Wesley Phillips – 1 win");
 

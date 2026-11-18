@@ -1,9 +1,9 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { parseResultPage } from "../src/core/benzing/parseResultPage";
-import { calculateBirdPoints, calculateTopPercent, calculateWins, percentPoints, ratioSeason } from "../src/core/scoring/extraSystems";
+import { calculateBaseBirdPoints, calculateBirdPoints, calculateTopPercent, calculateWins, percentPoints, ratioSeason } from "../src/core/scoring/extraSystems";
 import type { ArrivalInput } from "../src/core/scoring/fiveBird";
-import { birdPoints, topPercent, wins } from "../src/core/scoring/systems";
+import { baseBirdPoints, birdPoints, topPercent, wins } from "../src/core/scoring/systems";
 
 let seq = 0;
 const bird = (fancierKey: string, speed: number, basketed = 4, extra: Partial<ArrivalInput> = {}): ArrivalInput => {
@@ -50,6 +50,31 @@ describe("bird points (100 → 1)", () => {
     const b = bird("A", 1);
     expect(() => calculateBirdPoints([b, { ...b }])).toThrow(/Duplicate/);
     expect(calculateBirdPoints([])).toEqual({ n: 0, lines: [], fanciers: [], excluded: [] });
+  });
+});
+
+describe("bird points, first race as the base", () => {
+  it("place p scores B − p + 1 in every race; places below B score 0", () => {
+    const r = calculateBaseBirdPoints([bird("A", 30), bird("B", 20), bird("C", 10)], 5);
+    expect(r.lines.map((l) => [l.fancierKey, l.points])).toEqual([["A", 5], ["B", 4], ["C", 3]]);
+    const big = calculateBaseBirdPoints([bird("A", 30), bird("B", 20), bird("C", 10)], 2);
+    expect(big.lines.map((l) => l.points)).toEqual([2, 1]); // C is placed below B = 2: 0, left out
+    expect(big.fanciers.find((f) => f.fancierKey === "C")).toMatchObject({ score: 0, birdsScored: 0 });
+    expect(() => calculateBaseBirdPoints([], 0)).toThrow(/Base race/);
+  });
+
+  it("Mooi River scored with Matatiele 1 (322 home) as the base", () => {
+    const r = calculateBaseBirdPoints(mooi, 322);
+    expect([r.lines[0]!.points, r.lines[9]!.points, r.lines.at(-1)!.points]).toEqual([322, 313, 58]);
+  });
+
+  it("system wrapper uses the base, or the race itself until the base has results", () => {
+    expect(baseBirdPoints.usesBaseRace).toBe(true);
+    expect(baseBirdPoints.parse({})).toEqual({});
+    expect(baseBirdPoints.describe({})).toMatch(/first race/);
+    expect(baseBirdPoints.score(mooi, {}, [], null, { raceBasketed: null, baseBirds: 322 }).lines[0]!.points).toBe(322);
+    expect(baseBirdPoints.score(mooi, {}, []).lines[0]!.points).toBe(265);
+    expect(baseBirdPoints.score([], {}, []).n).toBe(0);
   });
 });
 

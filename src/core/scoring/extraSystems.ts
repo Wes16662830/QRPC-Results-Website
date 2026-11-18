@@ -87,6 +87,17 @@ export function calculateBirdPoints(arrivals: readonly ArrivalInput[], overrides
   return { n, lines, fanciers: fancierTotals(eligible, lines, (p) => p), excluded };
 }
 
+/**
+ * Best bird with the season's first race as the base: if B birds came home in the base race,
+ * place p scores B − p + 1 in every race (1st = B … Bth = 1); places below B score 0 and are left out.
+ */
+export function calculateBaseBirdPoints(arrivals: readonly ArrivalInput[], baseBirds: number, overrides: readonly Override[] = []): RaceCalculation {
+  if (!Number.isInteger(baseBirds) || baseBirds < 1) throw new RangeError("Base race bird count is missing.");
+  const { eligible, excluded } = rankEligible(arrivals, overrides, false);
+  const lines = eligible.slice(0, baseBirds).map((a, i) => line(a, i + 1, baseBirds - i));
+  return { n: lines.length, lines, fanciers: fancierTotals(eligible, lines, (p) => p), excluded };
+}
+
 export function calculateWins(arrivals: readonly ArrivalInput[], overrides: readonly Override[] = []): RaceCalculation {
   const { eligible, excluded } = rankEligible(arrivals, overrides, false);
   const lines = eligible.length ? [line(eligible[0]!, 1, 1)] : [];

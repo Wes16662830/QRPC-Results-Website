@@ -187,6 +187,26 @@ export async function competitionInclusions(db: D1Database, competitionId: numbe
   return new Set(rows.results.map((r) => r.race_id));
 }
 
+/**
+ * Birds home in a competition's base race: the first race (by date) this season that the competition
+ * uses and that has a stored result sheet. Null when no such race has results yet.
+ */
+export async function baseBirdsFor(db: D1Database, comp: Pick<CompetitionRow, "id" | "race_selection">, season: number): Promise<number | null> {
+  const row = await db
+    .prepare(
+      `SELECT s.arrival_count FROM race r
+       JOIN snapshot s ON s.id = (SELECT MAX(id) FROM snapshot WHERE race_id = r.id AND source = 'sheet')
+       WHERE r.club_id = ? AND r.season = ? AND r.kind = 'race' AND r.included = 1
+         AND CASE WHEN ? = 'picked'
+               THEN EXISTS (SELECT 1 FROM competition_inclusion i WHERE i.competition_id = ? AND i.race_id = r.id)
+               ELSE NOT EXISTS (SELECT 1 FROM competition_exclusion e WHERE e.competition_id = ? AND e.race_id = r.id) END
+       ORDER BY r.race_date, r.race_number LIMIT 1`,
+    )
+    .bind(CLUB_ID, season, comp.race_selection, comp.id, comp.id)
+    .first<{ arrival_count: number }>();
+  return row?.arrival_count ?? null;
+}
+
 /** Does this competition use this race? (race-level kind/included are checked by the standings.) */
 export async function competitionUsesRace(db: D1Database, comp: Pick<CompetitionRow, "id" | "race_selection">, raceId: number): Promise<boolean> {
   if (comp.race_selection === "picked") return (await competitionInclusions(db, comp.id)).has(raceId);
@@ -319,6 +339,7 @@ export function scoreArrivals(
   overrides: readonly Override[],
   raceParams: Record<string, unknown> | null = null,
   raceBasketed: number | null = null,
+  baseBirds: number | null = null,
 ) {
   const system = getSystem(comp.system);
   return system.score(
@@ -336,7 +357,7 @@ export function scoreArrivals(
     system.parse(JSON.parse(comp.params_json)),
     overrides,
     raceParams,
-    { raceBasketed },
+    { raceBasketed, baseBirds },
   );
 }
 
@@ -347,8 +368,9 @@ export async function scoreSnapshot(
   overrides: readonly Override[],
   raceParams: Record<string, unknown> | null = null,
   raceBasketed: number | null = null,
+  baseBirds: number | null = null,
 ) {
-  return scoreArrivals(await fancierIdsByName(db), arrivals, comp, overrides, raceParams, raceBasketed);
+  return scoreArrivals(await fancierIdsByName(db), arrivals, comp, overrides, raceParams, raceBasketed, baseBirds);
 }
 
 type DraftResult = { competitionId: number; calcId: number | null; changed: boolean; skipped?: string };
@@ -389,9 +411,11 @@ async function createDrafts(db: D1Database, race: RaceRow, actor: string, now: D
       continue;
     }
     const rp = raceParams.get(comp.id) ?? null;
+    // Base-race systems (best bird): the competition's first race this season sets the points scale.
+    const baseBirds = getSystem(comp.system).usesBaseRace ? await baseBirdsFor(db, comp, race.season) : null;
     let calc;
     try {
-      calc = scoreArrivals(ids, arrivals, comp, engineOverrides, rp, race.basketed_total);
+      calc = scoreArrivals(ids, arrivals, comp, engineOverrides, rp, race.basketed_total, baseBirds);
     } catch (e) {
       // e.g. the weighted competition has no closing time for this race: nothing is guessed.
       if (e instanceof MissingRaceSettings) {
@@ -401,7 +425,10 @@ async function createDrafts(db: D1Database, race: RaceRow, actor: string, now: D
       throw e;
     }
     const inputsHash = await sha256(
-      JSON.stringify({ snapshot: snap.content_sha256, system: comp.system, params: comp.params_json, raceParams: rp, raceBasketed: race.basketed_total, overrides: engineOverrides }),
+      JSON.stringify({
+        snapshot: snap.content_sha256, system: comp.system, params: comp.params_json, raceParams: rp,
+        raceBasketed: race.basketed_total, ...(baseBirds !== null ? { baseBirds } : {}), overrides: engineOverrides,
+      }),
     );
     const prev = latest.get(comp.id);
     if (prev && prev.inputs_sha256 === inputsHash && warnings.length === 0) {

@@ -5,13 +5,15 @@
  * points and per-fancier race scores, so storage, publishing, standings and exports work unchanged.
  */
 import { calculateRace, type ArrivalInput, type Override, type RaceCalculation } from "./fiveBird";
-import { calculateBirdPoints, calculateTopPercent, calculateWins } from "./extraSystems";
+import { calculateBaseBirdPoints, calculateBirdPoints, calculateTopPercent, calculateWins } from "./extraSystems";
 import { calculateWeightedRace, parseClosing } from "./weighted";
 
 /** Race facts some systems need beyond the arrivals. */
 export interface RaceContext {
   /** Birds basketed in the whole race (Benzing's race total), when known. */
   raceBasketed: number | null;
+  /** Birds home in the competition's base race (its first race this season), for base-race systems. */
+  baseBirds?: number | null;
 }
 
 export interface ParamField {
@@ -40,6 +42,8 @@ export interface ScoringSystem<P extends Record<string, unknown> = Record<string
   season: "sum" | "ratio";
   /** Short label for the score column, e.g. "Points", "Wins", "%". */
   unit: string;
+  /** True if scores depend on the competition's first race this season (RaceContext.baseBirds). */
+  usesBaseRace?: boolean;
   /** Plain-English summary for rules pages, given the parameters. */
   describe(params: P): string;
   fields: ParamField[];
@@ -143,6 +147,27 @@ export const birdPoints: ScoringSystem<Record<string, never>> = {
   score: (arrivals, _p, overrides) => calculateBirdPoints(arrivals, overrides),
 };
 
+/**
+ * Best bird, first race as the base: the competition's first race this season sets the scale. Every bird home
+ * there scores (1st = B … last = 1, B = birds home); every race then gives the same points for the same place,
+ * and birds placed below B score 0. Season: points add up per bird.
+ */
+export const baseBirdPoints: ScoringSystem<Record<string, never>> = {
+  id: "bird-points-base",
+  name: "Best bird (first race sets the points)",
+  entity: "bird",
+  season: "sum",
+  unit: "Points",
+  usesBaseRace: true,
+  fields: [],
+  defaults: {},
+  describe: () =>
+    "The season's first race in this competition sets the points: if B birds came home in it, 1st scores B points, 2nd B − 1, and so on down to 1 for the last bird. Every race gives the same points for the same place, so a win is always worth the same; birds placed below B score 0. Points add up per bird over the season.",
+  parse: () => ({}),
+  // Until the first race has results, a race is scored on its own size (it is then its own base).
+  score: (arrivals, _p, overrides, _rp, ctx) => calculateBaseBirdPoints(arrivals, ctx?.baseBirds ?? Math.max(1, arrivals.length), overrides),
+};
+
 /** Wins: the fancier with the first bird in the full result gets one win. */
 export const wins: ScoringSystem<Record<string, never>> = {
   id: "wins",
@@ -183,6 +208,7 @@ export const topPercent: ScoringSystem<{ percent: number }> = {
 export const SYSTEMS: Record<string, ScoringSystem> = {
   [topNPerFancier.id]: topNPerFancier as unknown as ScoringSystem,
   [weightedByBasketing.id]: weightedByBasketing as unknown as ScoringSystem,
+  [baseBirdPoints.id]: baseBirdPoints as unknown as ScoringSystem,
   [birdPoints.id]: birdPoints as unknown as ScoringSystem,
   [wins.id]: wins as unknown as ScoringSystem,
   [topPercent.id]: topPercent as unknown as ScoringSystem,

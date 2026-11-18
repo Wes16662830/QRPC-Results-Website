@@ -4,7 +4,7 @@ import { ratioSeason } from "../core/scoring/extraSystems";
 import { getSystem, MissingRaceSettings } from "../core/scoring/systems";
 import { CLUB_ID, type D1Database } from "./env";
 import {
-  competition as loadCompetition, competitionExclusions, competitionInclusions, competitionUsesRace, competitions, getRace, isLiveActive, raceParamsFor, sastDate, scoreSnapshot, UserError,
+  baseBirdsFor, competition as loadCompetition, competitionExclusions, competitionInclusions, competitionUsesRace, competitions, getRace, isLiveActive, raceParamsFor, sastDate, scoreSnapshot, UserError,
   type CalcRow, type CompetitionRow, type RaceRow, type StoredArrival, type StoredCalcResult,
 } from "./services";
 
@@ -434,7 +434,8 @@ export async function live(db: D1Database, now: Date) {
     const provisional = [];
     for (const comp of comps) {
       try {
-        const calc = await scoreSnapshot(db, arrivals, comp, [], raceParams.get(comp.id) ?? null);
+        const baseBirds = getSystem(comp.system).usesBaseRace ? await baseBirdsFor(db, comp, race.season) : null;
+        const calc = await scoreSnapshot(db, arrivals, comp, [], raceParams.get(comp.id) ?? null, race.basketed_total, baseBirds);
         provisional.push({ competition: competitionInfo(comp), result: decorateCalc({ ...calc, warnings: [] }, names, arrivals) });
       } catch (e) {
         if (!(e instanceof MissingRaceSettings)) throw e; // e.g. no closing time set yet: leave this competition out
