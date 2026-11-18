@@ -2,6 +2,7 @@ import { NavLink, Navigate, Route, Routes, useLocation } from "react-router";
 import { useEffect, useState } from "react";
 import { post, STALE_EVENT } from "./api";
 import { useApi } from "./hooks";
+import { SeasonSelect } from "./season";
 import { Loading } from "./ui";
 import { HomePage } from "./pages/Home";
 import { RacesPage } from "./pages/Races";
@@ -27,8 +28,10 @@ function Header({ admin, member }: { admin: boolean; member: boolean }) {
       <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-3">
         <NavLink to="/" className="flex items-center gap-2 font-bold">
           <img src="/favicon.svg" alt="" className="h-7 w-7" />
-          <span>QRPC Results</span>
+          <span className="hidden whitespace-nowrap min-[480px]:inline">QRPC Results</span>
+          <span className="min-[480px]:hidden">QRPC</span>
         </NavLink>
+        <SeasonSelect />
         <nav className="hidden gap-1 md:flex">
           {NAV.map(([to, label]) => (
             <NavLink key={to} to={to} end={to === "/"} className={({ isActive }) => `rounded-md px-3 py-1.5 text-sm font-medium ${isActive ? "bg-white/15" : "opacity-85 hover:opacity-100"}`}>
@@ -44,7 +47,7 @@ function Header({ admin, member }: { admin: boolean; member: boolean }) {
           )}
           {member && (
             <button
-              className="opacity-80 hover:opacity-100"
+              className="whitespace-nowrap opacity-80 hover:opacity-100"
               onClick={async () => {
                 await post("/api/logout");
                 window.location.href = "/login";

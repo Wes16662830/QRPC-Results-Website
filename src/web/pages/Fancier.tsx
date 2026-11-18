@@ -1,12 +1,14 @@
 import { Link, useParams } from "react-router";
 import { fmtDate } from "../format";
 import { useApi } from "../hooks";
+import { useSeason } from "../season";
 import type { FancierDetail } from "../types";
 import { Card, ErrorBox, Loading, PageTitle, Stat, TableWrap } from "../ui";
 
 export function FancierPage() {
   const { id } = useParams();
-  const { data, error } = useApi<FancierDetail>(`/api/fanciers/${id}`);
+  const { season } = useSeason();
+  const { data, error } = useApi<FancierDetail>(season ? `/api/fanciers/${id}?season=${season}` : null);
   if (error) return <ErrorBox error={error} />;
   if (!data) return <Loading />;
   const main = data.standings[0];

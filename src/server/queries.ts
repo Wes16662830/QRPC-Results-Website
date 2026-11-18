@@ -452,18 +452,19 @@ export async function live(db: D1Database, now: Date) {
   return { races: out, pollIntervalMinutes: 5 };
 }
 
-export async function home(db: D1Database, now: Date) {
-  const season = await defaultSeason(db, now);
+/** Home page for one season (default: the latest season with races). */
+export async function home(db: D1Database, now: Date, seasonParam?: number) {
+  const season = seasonParam ?? (await defaultSeason(db, now));
   const latest = await db
     .prepare(
       `SELECT r.id FROM race r JOIN race_calc c ON c.race_id = r.id AND c.status = 'published'
-       WHERE r.club_id = ? ORDER BY r.race_date DESC LIMIT 1`,
+       WHERE r.club_id = ? AND r.season = ? ORDER BY r.race_date DESC LIMIT 1`,
     )
-    .bind(CLUB_ID)
+    .bind(CLUB_ID, season)
     .first<{ id: number }>();
   const next = await db
-    .prepare("SELECT * FROM race WHERE club_id = ? AND race_date >= ? ORDER BY race_date LIMIT 1")
-    .bind(CLUB_ID, sastDate(now))
+    .prepare("SELECT * FROM race WHERE club_id = ? AND season = ? AND kind = 'race' AND race_date >= ? ORDER BY race_date LIMIT 1")
+    .bind(CLUB_ID, season, sastDate(now))
     .first<RaceRow>();
   const champ = await championship(db, null, season);
   const latestDetail = latest ? await raceDetail(db, latest.id, now) : null;

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSeason } from "../season";
 import { useParams } from "react-router";
 import { fmtArrival, fmtDate, fmtDateTime, fmtKm, fmtSpeed } from "../format";
 import { useApi } from "../hooks";
@@ -13,6 +14,12 @@ export function RacePage() {
   const { id } = useParams();
   const { data, error } = useApi<RaceDetail>(`/api/races/${id}`);
   const [tab, setTab] = useState<Tab | null>(null);
+  const { season, setSeason } = useSeason();
+  // A race belongs to one season: opening it (e.g. from a shared link) switches the selector to that season.
+  const raceSeason = data?.race.season;
+  useEffect(() => {
+    if (raceSeason && season && raceSeason !== season) setSeason(raceSeason);
+  }, [raceSeason]); // eslint-disable-line react-hooks/exhaustive-deps
   if (error) return <ErrorBox error={error} />;
   if (!data) return <Loading />;
   const { race } = data;

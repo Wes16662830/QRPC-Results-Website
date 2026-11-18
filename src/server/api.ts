@@ -114,6 +114,12 @@ async function handleApiInner(request: Request, env: Env, deps: ApiDeps = {}): P
       return await adminRoutes(request, path, url, ctx, actor, now, m, seasonParam);
     }
 
+    // Season list (years only): needed by the season selector for members and admins alike.
+    if (path === "/api/seasons") {
+      const list = await seasons(db);
+      return json({ seasons: list, current: list[0] ?? now.getUTCFullYear() });
+    }
+
     // ----- members -----
     const member = await isMember(db, env.SESSION_SECRET, request, now);
     if (path === "/api/session") {
@@ -123,8 +129,7 @@ async function handleApiInner(request: Request, env: Env, deps: ApiDeps = {}): P
     if (!member) return json({ error: "Please sign in." }, 401);
     if (request.method !== "GET") return json({ error: "Not found" }, 404);
 
-    if (path === "/api/home") return json(await home(db, now));
-    if (path === "/api/seasons") return json(await seasons(db));
+    if (path === "/api/home") return json(await home(db, now, Number(url.searchParams.get("season")) || undefined));
     if (path === "/api/races") return json(await listRaces(db, await seasonParam(), now));
     if (path === "/api/live") return json(await live(db, now));
     const compParam = url.searchParams.get("competition");

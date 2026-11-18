@@ -1,6 +1,7 @@
 import { Link } from "react-router";
 import { fmtDate, fmtKm } from "../format";
 import { useApi } from "../hooks";
+import { useSeason } from "../season";
 import type { RaceSummary } from "../types";
 import { ErrorBox, Loading, PageTitle, StateBadge } from "../ui";
 
@@ -28,14 +29,16 @@ function RaceList({ races }: { races: RaceSummary[] }) {
 }
 
 export function RacesPage() {
-  const { data, error } = useApi<RaceSummary[]>("/api/races");
+  const { season } = useSeason();
+  const { data, error } = useApi<RaceSummary[]>(season ? `/api/races?season=${season}` : null);
   if (error) return <ErrorBox error={error} />;
   if (!data) return <Loading />;
   const races = data.filter((r) => r.kind === "race");
   const trainings = data.filter((r) => r.kind === "training");
   return (
     <>
-      <PageTitle title="Races" sub={`${races.length} races · ${trainings.length} training/tosses`} />
+      <PageTitle title={`Races ${season}`} sub={`${races.length} races · ${trainings.length} training/tosses`} />
+      {data.length === 0 && <p className="text-sm text-muted">No races for {season} yet.</p>}
       <RaceList races={races} />
       {trainings.length > 0 && (
         <>

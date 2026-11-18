@@ -1,11 +1,13 @@
 import { Link } from "react-router";
 import { fmtDate, fmtSpeed } from "../format";
 import { useApi } from "../hooks";
+import { useSeason } from "../season";
 import type { Home } from "../types";
 import { Card, ErrorBox, FancierLink, Loading, PageTitle, StateBadge } from "../ui";
 
 export function HomePage() {
-  const { data, error } = useApi<Home>("/api/home");
+  const { season } = useSeason();
+  const { data, error } = useApi<Home>(season ? `/api/home?season=${season}` : null);
   if (error) return <ErrorBox error={error} />;
   if (!data) return <Loading />;
   const latest = data.latestRace;
@@ -87,7 +89,7 @@ export function HomePage() {
               </p>
             </>
           ) : (
-            <p className="text-sm text-muted">No upcoming race in Benzing yet.</p>
+            <p className="text-sm text-muted">No upcoming race for {data.season} in Benzing yet.</p>
           )}
         </Card>
       </div>

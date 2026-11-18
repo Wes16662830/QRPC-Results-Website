@@ -1,6 +1,7 @@
 import { Link, useSearchParams } from "react-router";
 import { fmtPoints } from "../format";
 import { useApi } from "../hooks";
+import { useSeason } from "../season";
 import { ExportBar } from "../share";
 import type { Championship, CompetitionInfo } from "../types";
 import { Card, ErrorBox, FancierLink, Loading, Notice, PageTitle, TableWrap } from "../ui";
@@ -112,8 +113,9 @@ function StandingsTable({ data }: { data: Championship }) {
 export function ChampionshipPage({ admin = false }: { admin?: boolean }) {
   const [params, setParams] = useSearchParams();
   const slug = params.get("competition");
+  const { season } = useSeason();
   const base = admin ? "/api/admin/championship" : "/api/championship";
-  const { data, error } = useApi<Championship>(`${base}${slug ? `?competition=${encodeURIComponent(slug)}` : ""}`);
+  const { data, error } = useApi<Championship>(season ? `${base}?season=${season}${slug ? `&competition=${encodeURIComponent(slug)}` : ""}` : null);
   if (error) return <ErrorBox error={error} />;
   if (!data) return <Loading />;
   const c = data.competition;

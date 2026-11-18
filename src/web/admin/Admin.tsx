@@ -3,6 +3,7 @@ import { Link, NavLink, Route, Routes, useParams } from "react-router";
 import { ApiError, get, post } from "../api";
 import { fmtDate, fmtDateTime } from "../format";
 import { useApi } from "../hooks";
+import { useSeason } from "../season";
 import { ChampionshipPage } from "../pages/Championship";
 import { CompetitionResultView } from "../results";
 import type { AdminRaceDetail, CompetitionInfo, CompetitionResult, RaceSummary } from "../types";
@@ -43,6 +44,7 @@ function useAction() {
 
 export function AdminApp() {
   const overview = useApi<Overview>("/api/admin/overview");
+  const { season: selected } = useSeason();
   if (overview.error) {
     return (
       <>
@@ -73,10 +75,10 @@ export function AdminApp() {
       </nav>
       <Routes>
         <Route index element={<OverviewPage o={overview.data} reload={overview.reload} />} />
-        <Route path="races" element={<AdminRaces season={overview.data.season} />} />
+        <Route path="races" element={selected ? <AdminRaces season={selected} /> : <Loading />} />
         <Route path="races/:id" element={<AdminRace />} />
         <Route path="standings" element={<ChampionshipPage admin />} />
-        <Route path="settings" element={<SettingsPage season={overview.data.season} passwordSet={overview.data.memberPasswordSet} />} />
+        <Route path="settings" element={selected ? <SettingsPage key={selected} season={selected} passwordSet={overview.data.memberPasswordSet} /> : <Loading />} />
         <Route path="audit" element={<AuditPage />} />
       </Routes>
     </>
@@ -84,7 +86,9 @@ export function AdminApp() {
 }
 
 function OverviewPage({ o, reload }: { o: Overview; reload: () => void }) {
-  const [season, setSeason] = useState(o.season || new Date().getFullYear());
+  const { season: selected, setSeason: selectSeason } = useSeason();
+  // Sync defaults to the later of the selected season and this year, so a new season can be fetched.
+  const [season, setSeason] = useState(Math.max(selected ?? 0, new Date().getFullYear()));
   const sync = useAction();
   return (
     <>
@@ -110,6 +114,7 @@ function OverviewPage({ o, reload }: { o: Overview; reload: () => void }) {
                   async () => {
                     const r = await post<{ races: number; trainings: number }>("/api/admin/sync-races", { season });
                     reload();
+                    selectSeason(season); // show the season just synced across the site
                     return r;
                   },
                   (r) => {

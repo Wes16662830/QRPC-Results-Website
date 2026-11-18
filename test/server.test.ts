@@ -545,6 +545,19 @@ describe("HTTP API", () => {
     expect(fancier.standings[0]).toMatchObject({ competition: { slug: "five-bird" }, rank: 1, total: 122, of: 7 });
     expect(fancier.races[0]!.results["five-bird"]!.score).toBe(122);
 
+    // Seasons: listed without a session (the selector also serves admins); home is per season.
+    const seasonsRes = (await (await call("/api/seasons")).json()) as { seasons: number[]; current: number };
+    expect(seasonsRes).toEqual({ seasons: [2026], current: 2026 });
+    db.raw.exec("INSERT INTO race (club_id, benzing_race_id, season, race_number, name, slug, race_date, kind) VALUES (1, 99001, 2027, 1, 'Future Race', 'future-race', '2027-06-05', 'race')");
+    expect(((await (await call("/api/seasons")).json()) as { seasons: number[] }).seasons).toEqual([2027, 2026]);
+    const home2027 = (await (await call("/api/home?season=2027", { cookie })).json()) as { season: number; latestRace: unknown; championshipTop5: unknown[]; nextRace: { name: string } | null };
+    expect(home2027).toMatchObject({ season: 2027, latestRace: null, championshipTop5: [] });
+    expect(home2027.nextRace?.name).toBe("Future Race");
+    const home2026 = (await (await call("/api/home?season=2026", { cookie })).json()) as { season: number; latestRace: { race: { name: string } }; nextRace: unknown };
+    expect(home2026.latestRace.race.name).toBe("MooiRiver");
+    expect(home2026.nextRace).toBeNull();
+    expect(((await (await call("/api/races?season=2027", { cookie })).json()) as unknown[]).length).toBe(1);
+
     // Members cannot reach admin data or write.
     expect((await call(`/api/races/${mooi.id}`, { cookie, method: "POST", body: "{}" })).status).toBe(404);
     expect((await call("/api/nope", { cookie })).status).toBe(404);
