@@ -3,8 +3,9 @@ import { Link, NavLink, Route, Routes, useParams } from "react-router";
 import { ApiError, post } from "../api";
 import { fmtDate, fmtDateTime } from "../format";
 import { useApi } from "../hooks";
+import { ChampionshipPage } from "../pages/Championship";
 import { ScoreTable } from "../results";
-import type { AdminRaceDetail, CompetitionInfo, RaceSummary } from "../types";
+import type { AdminRaceDetail, CompetitionInfo, CompetitionResult, RaceSummary } from "../types";
 import { Card, ErrorBox, Loading, Notice, PageTitle, StateBadge, TableWrap } from "../ui";
 
 interface Overview {
@@ -58,6 +59,7 @@ export function AdminApp() {
         {[
           ["/admin", "Overview"],
           ["/admin/races", "Races"],
+          ["/admin/standings", "Standings"],
           ["/admin/settings", "Settings"],
           ["/admin/audit", "Audit log"],
         ].map(([to, label]) => (
@@ -73,6 +75,7 @@ export function AdminApp() {
         <Route index element={<OverviewPage o={overview.data} reload={overview.reload} />} />
         <Route path="races" element={<AdminRaces season={overview.data.season} />} />
         <Route path="races/:id" element={<AdminRace />} />
+        <Route path="standings" element={<ChampionshipPage admin />} />
         <Route path="settings" element={<SettingsPage season={overview.data.season} passwordSet={overview.data.memberPasswordSet} />} />
         <Route path="audit" element={<AuditPage />} />
       </Routes>
@@ -214,8 +217,13 @@ function AdminRaces({ season }: { season: number }) {
 
   const calculateAll = () =>
     runBulk("Calculate all", toCalculate, async (r) => {
-      const res = await post<{ changed: boolean; warnings: string[] }>(`/api/admin/races/${r.id}/calculate`);
-      return { ok: true, text: res.changed ? `draft created${res.warnings.length ? ` (${res.warnings.length} note${res.warnings.length > 1 ? "s" : ""})` : ""}` : "no change since last calculation" };
+      const res = await post<{ changed: boolean; warnings: string[]; drafts: { skipped?: string }[] }>(`/api/admin/races/${r.id}/calculate`);
+      const skipped = res.drafts.filter((d) => d.skipped).length;
+      const notes = [
+        res.warnings.length ? `${res.warnings.length} note${res.warnings.length > 1 ? "s" : ""}` : "",
+        skipped ? `${skipped} competition${skipped > 1 ? "s" : ""} need a closing time set on the race page` : "",
+      ].filter(Boolean);
+      return { ok: true, text: `${res.changed ? "draft created" : "no change since last calculation"}${notes.length ? ` (${notes.join("; ")})` : ""}` };
     });
 
   const publishAll = () =>
@@ -309,6 +317,54 @@ function AdminRaces({ season }: { season: number }) {
   );
 }
 
+/** Per-race settings for a competition (e.g. the weighted system's closing day and time). */
+function RaceParamsCard({ raceId, result, onSaved }: { raceId: number; result: CompetitionResult; onSaved: () => Promise<void> | void }) {
+  const fields = result.competition.raceFields;
+  const [values, setValues] = useState<Record<string, string>>(
+    Object.fromEntries(fields.map((f) => [f.key, result.raceParams?.[f.key] === undefined ? "" : String(result.raceParams[f.key])])),
+  );
+  const save = useAction();
+  return (
+    <Card title={`${result.competition.name}: race settings`} className="mb-4">
+      {!result.raceParams && (
+        <div className="mb-3">
+          <Notice>Not set yet, so {result.competition.name} doesn't score this race.</Notice>
+        </div>
+      )}
+      <form
+        className="flex flex-wrap items-end gap-3 text-sm"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void save.run(async () => {
+            const r = await post<{ changed: boolean }>(`/api/admin/competitions/${result.competition.id}/races/${raceId}/params`, values);
+            await onSaved();
+            return r;
+          }, (r) => ((r as { changed: boolean }).changed ? "Saved. A new draft was created – review it above and publish." : "Saved."));
+        }}
+      >
+        {fields.map((f) => (
+          <label key={f.key} className="block">
+            {f.label}
+            <input
+              className="input mt-1 w-36"
+              type={f.type === "time" ? "time" : "number"}
+              min={f.min}
+              max={f.max}
+              value={values[f.key] ?? ""}
+              onChange={(e) => setValues({ ...values, [f.key]: e.target.value })}
+            />
+            {f.help && <span className="mt-0.5 block text-xs text-muted">{f.help}</span>}
+          </label>
+        ))}
+        <button className="btn btn-primary" disabled={save.busy || fields.some((f) => !values[f.key])}>
+          Save
+        </button>
+      </form>
+      {save.view}
+    </Card>
+  );
+}
+
 function AdminRace() {
   const { id } = useParams();
   const { data, error, reload } = useApi<AdminRaceDetail>(`/api/admin/races/${id}`);
@@ -398,8 +454,16 @@ function AdminRace() {
         </Card>
       )}
 
+      {data.results.filter((r) => r.competition.raceFields.length > 0 && r.competition.active).map((r) => (
+        <RaceParamsCard key={`params-${r.competition.slug}-${JSON.stringify(r.raceParams)}`} raceId={race.id} result={r} onSaved={reload} />
+      ))}
+
       {data.results.map((r) => (
-        <Card key={r.competition.slug} title={`Published: ${r.competition.name}${r.competition.active ? "" : " (inactive)"}`} className="mb-4">
+        <Card
+          key={r.competition.slug}
+          title={`Published: ${r.competition.name}${r.competition.active ? "" : " (inactive)"}${r.competition.visibility === "admin" ? " (admin only)" : ""}`}
+          className="mb-4"
+        >
           {r.published ? <ScoreTable calc={r.published} /> : <p className="text-sm text-muted">Nothing published yet.</p>}
         </Card>
       ))}
@@ -472,7 +536,8 @@ interface AdminCompetition extends CompetitionInfo {
 interface SystemInfo {
   id: string;
   name: string;
-  fields: { key: string; label: string; type: "integer"; min: number; max: number }[];
+  fields: { key: string; label: string; type: "integer" | "time"; min?: number; max?: number }[];
+  raceFields?: { key: string; label: string }[];
   defaults: Record<string, unknown>;
 }
 
@@ -482,6 +547,7 @@ function CompetitionEditor({ comp, systems, races, season, onSaved }: { comp: Ad
   const [params, setParams] = useState<Record<string, unknown>>(comp.params);
   const [racesCounted, setRacesCounted] = useState(comp.racesCounted);
   const [bestX, setBestX] = useState<number | null>(comp.bestX);
+  const [visibility, setVisibility] = useState(comp.visibility);
   const save = useAction();
   const raceAction = useAction();
   return (
@@ -491,7 +557,7 @@ function CompetitionEditor({ comp, systems, races, season, onSaved }: { comp: Ad
         onSubmit={(e) => {
           e.preventDefault();
           void save.run(async () => {
-            const r = await post<{ newDrafts: number }>(`/api/admin/competitions/${comp.id}`, { name, params, racesCounted, bestX, season });
+            const r = await post<{ newDrafts: number }>(`/api/admin/competitions/${comp.id}`, { name, params, racesCounted, bestX, visibility, season });
             onSaved();
             return r;
           }, (r) => {
@@ -510,6 +576,18 @@ function CompetitionEditor({ comp, systems, races, season, onSaved }: { comp: Ad
             <input className="input mt-1" type="number" min={f.min} max={f.max} value={String(params[f.key] ?? "")} onChange={(e) => setParams({ ...params, [f.key]: Number(e.target.value) })} />
           </label>
         ))}
+        <label className="block">
+          Who can see it
+          <select className="input mt-1" value={visibility} onChange={(e) => setVisibility(e.target.value as "members" | "admin")}>
+            <option value="members">Members and admins</option>
+            <option value="admin">Admins only</option>
+          </select>
+        </label>
+        {comp.raceFields.length > 0 && (
+          <p className="text-xs text-muted sm:col-span-2">
+            {comp.raceFields.map((f) => f.label).join(" and ")} are set per race, on each race's admin page.
+          </p>
+        )}
         <label className="block">
           Races counted
           <select className="input mt-1" value={racesCounted} onChange={(e) => setRacesCounted(e.target.value as "all" | "best")}>
@@ -577,6 +655,7 @@ function NewCompetition({ systems, season, onCreated }: { systems: SystemInfo[];
   const [systemId, setSystemId] = useState(systems[0]?.id ?? "");
   const system = systems.find((s) => s.id === systemId);
   const [params, setParams] = useState<Record<string, unknown>>(system?.defaults ?? {});
+  const [visibility, setVisibility] = useState<"members" | "admin">("admin");
   const create = useAction();
   return (
     <Card title="Add a competition">
@@ -585,7 +664,7 @@ function NewCompetition({ systems, season, onCreated }: { systems: SystemInfo[];
         onSubmit={(e) => {
           e.preventDefault();
           void create.run(async () => {
-            await post("/api/admin/competitions", { name, system: systemId, params, season });
+            await post("/api/admin/competitions", { name, system: systemId, params, visibility, season });
             setName("");
             onCreated();
           }, "Created. Drafts were made for every race with stored results. Review and publish them.");
@@ -611,6 +690,16 @@ function NewCompetition({ systems, season, onCreated }: { systems: SystemInfo[];
             <input className="input mt-1" type="number" min={f.min} max={f.max} value={String(params[f.key] ?? "")} onChange={(e) => setParams({ ...params, [f.key]: Number(e.target.value) })} />
           </label>
         ))}
+        <label className="block">
+          Who can see it
+          <select className="input mt-1" value={visibility} onChange={(e) => setVisibility(e.target.value as "members" | "admin")}>
+            <option value="admin">Admins only (while you check it)</option>
+            <option value="members">Members and admins</option>
+          </select>
+        </label>
+        {system && (system.raceFields ?? []).length > 0 && (
+          <p className="text-xs text-muted sm:col-span-2">This system also needs {(system.raceFields ?? []).map((f) => f.label.toLowerCase()).join(" and ")} set on each race's admin page.</p>
+        )}
         <div className="sm:col-span-2">
           <button className="btn btn-primary" disabled={create.busy || !name.trim()}>
             Add competition

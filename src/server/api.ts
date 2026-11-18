@@ -12,7 +12,7 @@ import {
 import { SYSTEMS } from "../core/scoring/systems";
 import {
   addOverride, audit, calculateResults, createCompetition, publish, recalculateRace, recalculateSeason,
-  revokeOverride, setCompetitionRace, syncRaces, updateCompetition, updateRace, UserError, type Ctx,
+  revokeOverride, setCompetitionRace, setCompetitionRaceParams, syncRaces, updateCompetition, updateRace, UserError, type Ctx,
 } from "./services";
 
 export interface ApiDeps {
@@ -227,21 +227,26 @@ async function adminRoutes(
   }
   if (path === "/api/admin/competitions") {
     if (post) {
-      const b = await body<{ name: string; system: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null; season?: number }>(request);
+      const b = await body<{ name: string; system: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null; visibility?: "members" | "admin"; season?: number }>(request);
       return json(await createCompetition(ctx, b, actor, Number(b.season) || (await seasonParam())));
     }
     const comps = await listCompetitions(db, { activeOnly: false });
     const exclusions = await db.prepare("SELECT competition_id, race_id FROM competition_exclusion").all<{ competition_id: number; race_id: number }>();
     return json({
       competitions: comps.map((c) => ({ ...c, excludedRaceIds: exclusions.results.filter((e) => e.competition_id === c.id).map((e) => e.race_id) })),
-      systems: Object.values(SYSTEMS).map((s) => ({ id: s.id, name: s.name, fields: s.fields, defaults: s.defaults })),
+      systems: Object.values(SYSTEMS).map((s) => ({ id: s.id, name: s.name, fields: s.fields, defaults: s.defaults, raceFields: s.raceFields ?? [] })),
     });
   }
   let c = m(/^\/api\/admin\/competitions\/(\d+)$/);
   if (c && post) {
-    const b = await body<{ name?: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null; active?: boolean; displayOrder?: number; season?: number }>(request);
+    const b = await body<{ name?: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null; active?: boolean; displayOrder?: number; visibility?: "members" | "admin"; season?: number }>(request);
     const drafts = await updateCompetition(ctx, Number(c[1]), b, actor, Number(b.season) || (await seasonParam()));
     return json({ ok: true, newDrafts: drafts.filter((d) => d.changed).length });
+  }
+  c = m(/^\/api\/admin\/competitions\/(\d+)\/races\/(\d+)\/params$/);
+  if (c && post) return json(await setCompetitionRaceParams(ctx, Number(c[1]), Number(c[2]), await body(request), actor));
+  if (path === "/api/admin/championship") {
+    return json(await championship(db, url.searchParams.get("competition"), await seasonParam(), { admin: true }));
   }
   c = m(/^\/api\/admin\/competitions\/(\d+)\/races\/(\d+)$/);
   if (c && post) {

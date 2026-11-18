@@ -1,9 +1,9 @@
 /** Read models for the site. Members only ever see PUBLISHED 5-bird results. */
 import { calculateSeason } from "../core/scoring/fiveBird";
-import { getSystem } from "../core/scoring/systems";
+import { getSystem, MissingRaceSettings } from "../core/scoring/systems";
 import { CLUB_ID, type D1Database } from "./env";
 import {
-  competition as loadCompetition, competitionExclusions, competitions, getRace, isLiveActive, sastDate, scoreSnapshot,
+  competition as loadCompetition, competitionExclusions, competitions, getRace, isLiveActive, raceParamsFor, sastDate, scoreSnapshot, UserError,
   type CalcRow, type CompetitionRow, type RaceRow, type StoredArrival, type StoredCalcResult,
 } from "./services";
 
@@ -23,10 +23,14 @@ export function competitionInfo(c: CompetitionRow) {
     bestX: c.best_x,
     active: c.active === 1,
     displayOrder: c.display_order,
+    visibility: c.visibility,
+    /** Settings the admin sets per race (e.g. closing time); empty for most systems. */
+    raceFields: system.raceFields ?? [],
   };
 }
 
-export async function listCompetitions(db: D1Database, opts: { activeOnly?: boolean } = { activeOnly: true }) {
+/** Members see active, member-visible competitions only. */
+export async function listCompetitions(db: D1Database, opts: { activeOnly?: boolean; membersOnly?: boolean } = { activeOnly: true, membersOnly: true }) {
   return (await competitions(db, opts)).map(competitionInfo);
 }
 
@@ -133,6 +137,8 @@ function decorateCalc(calc: StoredCalcResult, names: Map<string, string>, arriva
       score: f.score,
       birdsScored: f.birdsScored,
       benzingPositions: f.benzingPositions,
+      points: f.points,
+      basketed: f.basketed,
     })),
     excluded: calc.excluded.map((e) => ({ ...e, ring: byOrder.get(e.arrivalId)?.ring ?? null })),
   };
@@ -187,12 +193,13 @@ async function buildRaceDetail(db: D1Database, raceId: number, now: Date, opts: 
       ...decorateCalc(JSON.parse(c.result_json) as StoredCalcResult, names, snapArrivals),
     };
   };
-  const comps = await competitions(db, { activeOnly: !opts.admin });
+  const comps = await competitions(db, opts.admin ? {} : { activeOnly: true, membersOnly: true });
+  const raceParams = opts.admin ? await raceParamsFor(db, raceId) : new Map<number, Record<string, unknown>>();
   const results = [];
   for (const comp of comps) {
     const published = await loadCalc(comp.id, "published");
     const draft = opts.admin ? await loadCalc(comp.id, "draft") : null;
-    results.push({ competition: competitionInfo(comp), published, draft });
+    results.push({ competition: competitionInfo(comp), published, draft, raceParams: raceParams.get(comp.id) ?? null });
   }
 
   const first = arrivals[0];
@@ -237,8 +244,10 @@ export async function adminRaceDetail(db: D1Database, raceId: number, now: Date)
 }
 
 /** Season standings for one competition, from PUBLISHED race results only. */
-export async function championship(db: D1Database, competitionRef: number | string | null, season: number) {
-  const comp = competitionRef === null ? (await competitions(db, { activeOnly: true }))[0]! : await loadCompetition(db, competitionRef);
+export async function championship(db: D1Database, competitionRef: number | string | null, season: number, opts: { admin?: boolean } = {}) {
+  const comp =
+    competitionRef === null ? (await competitions(db, { activeOnly: true, membersOnly: !opts.admin }))[0]! : await loadCompetition(db, competitionRef);
+  if (!opts.admin && comp.visibility !== "members") throw new UserError("Competition not found", 404);
   const excluded = await competitionExclusions(db, comp.id);
   const races = (
     await db
@@ -293,7 +302,7 @@ export async function fancierDetail(db: D1Database, fancierId: number, season: n
     )
     .bind(fancierId, season)
     .all<{ id: number; name: string; race_date: string; kind: string; included: number; basketed: number; returned: number }>();
-  const comps = await competitions(db, { activeOnly: true });
+  const comps = await competitions(db, { activeOnly: true, membersOnly: true });
   const published = await db
     .prepare(
       `SELECT c.race_id, c.competition_id, c.result_json FROM race_calc c JOIN race r ON r.id = c.race_id
@@ -341,9 +350,10 @@ export async function fancierDetail(db: D1Database, fancierId: number, season: n
 export async function live(db: D1Database, now: Date) {
   const rows = await db.prepare("SELECT * FROM race WHERE club_id = ? AND live_mode != 'off'").bind(CLUB_ID).all<RaceRow>();
   const active = rows.results.filter((r) => isLiveActive(r, now));
-  const comps = await competitions(db, { activeOnly: true });
+  const comps = await competitions(db, { activeOnly: true, membersOnly: true });
   const out = [];
   for (const race of active) {
+    const raceParams = await raceParamsFor(db, race.id);
     const snap = await db
       .prepare("SELECT fetched_at, arrivals_json FROM snapshot WHERE race_id = ? AND source = 'live' ORDER BY id DESC LIMIT 1")
       .bind(race.id)
@@ -354,8 +364,12 @@ export async function live(db: D1Database, now: Date) {
     for (const a of arrivals) names.set(`name:${a.fancierName}`, a.fancierName);
     const provisional = [];
     for (const comp of comps) {
-      const calc = await scoreSnapshot(db, arrivals, comp, []);
-      provisional.push({ competition: competitionInfo(comp), result: decorateCalc({ ...calc, warnings: [] }, names, arrivals) });
+      try {
+        const calc = await scoreSnapshot(db, arrivals, comp, [], raceParams.get(comp.id) ?? null);
+        provisional.push({ competition: competitionInfo(comp), result: decorateCalc({ ...calc, warnings: [] }, names, arrivals) });
+      } catch (e) {
+        if (!(e instanceof MissingRaceSettings)) throw e; // e.g. no closing time set yet: leave this competition out
+      }
     }
     out.push({
       race: raceSummary(race, "live"),

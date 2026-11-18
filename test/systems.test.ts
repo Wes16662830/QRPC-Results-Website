@@ -3,7 +3,7 @@ import { getSystem, SYSTEMS, topNPerFancier } from "../src/core/scoring/systems"
 
 describe("scoring system registry", () => {
   it("registers the top-N system", () => {
-    expect(Object.keys(SYSTEMS)).toEqual(["top-n-per-fancier"]);
+    expect(Object.keys(SYSTEMS)).toEqual(["top-n-per-fancier", "weighted-by-basketing"]);
     expect(getSystem("top-n-per-fancier")).toBe(topNPerFancier);
     expect(() => getSystem("nope")).toThrow(/Unknown scoring system/);
   });

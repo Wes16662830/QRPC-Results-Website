@@ -22,6 +22,12 @@ export interface ArrivalInput {
   benzingPosition: number;
   /** Row order on Benzing's sheet; breaks exact speed ties so no positions are shared. */
   listOrder: number;
+  /** Day of the race the bird arrived on (1 = liberation day). Needed by cutoff-based systems. */
+  arrivalDay?: number;
+  /** Local clock time "HH:MM:SS" (SAST). Needed by cutoff-based systems. */
+  arrivalTime?: string;
+  /** Birds this fancier basketed for the race. Needed by basketing-weighted systems. */
+  basketed?: number;
 }
 
 export interface Override {
@@ -51,6 +57,9 @@ export interface FancierRaceScore {
   score: number;
   /** Benzing positions of the scoring birds, in order. */
   benzingPositions: number[];
+  /** Weighted systems only: points before weighting, and the divisor used. */
+  points?: number;
+  basketed?: number;
 }
 
 export interface RaceCalculation {
@@ -168,7 +177,8 @@ export function calculateSeason(races: readonly SeasonRaceInput[], settings: Sea
       settings.racesCounted === "all" ? ranked : ranked.slice(0, settings.racesCounted.best);
     const countedSet = new Set(counted);
     const countedRaceIds = races.map((r) => r.raceId).filter((id) => countedSet.has(id));
-    const total = countedRaceIds.reduce((s, id) => s + perRace[id]!, 0);
+    // Rounded to 2 decimals so fractional (weighted) race scores add up exactly as displayed.
+    const total = Math.round(countedRaceIds.reduce((s, id) => s + perRace[id]!, 0) * 100) / 100;
     return { fancierKey, total, rank: 0, perRace, countedRaceIds };
   });
 

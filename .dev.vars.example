@@ -5,3 +5,7 @@ DEV_ADMIN_EMAIL=you@example.com
 # Production (set as Pages secrets/variables, not here):
 # ACCESS_TEAM_DOMAIN=yourteam.cloudflareaccess.com
 # ACCESS_AUD=<Application Audience (AUD) tag from the Access application>
+
+# Local dev: blank the Access settings from wrangler.toml so DEV_ADMIN_EMAIL applies on localhost.
+ACCESS_TEAM_DOMAIN=
+ACCESS_AUD=

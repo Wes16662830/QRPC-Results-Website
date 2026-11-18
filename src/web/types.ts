@@ -43,7 +43,7 @@ export interface Calc {
   n: number;
   warnings: string[];
   lines: { scoringPosition: number; points: number; fancierId: string; fancierName: string; ring: string; benzingPosition: number; speed: number; arrivalDay: number; arrivalTime: string }[];
-  fanciers: { rank: number | null; fancierId: string; fancierName: string; score: number; birdsScored: number; benzingPositions: number[] }[];
+  fanciers: { rank: number | null; fancierId: string; fancierName: string; score: number; birdsScored: number; benzingPositions: number[]; points?: number; basketed?: number }[];
   excluded: { arrivalId: string; reason: string; ring: string | null }[];
 }
 
@@ -59,12 +59,16 @@ export interface CompetitionInfo {
   bestX: number | null;
   active: boolean;
   displayOrder: number;
+  visibility: "members" | "admin";
+  raceFields: { key: string; label: string; type: "integer" | "time"; min?: number; max?: number; help?: string }[];
 }
 
 export interface CompetitionResult {
   competition: CompetitionInfo;
   published: Calc | null;
   draft: Calc | null;
+  /** Admin only: this race's settings for the competition (e.g. closing time). */
+  raceParams?: Record<string, unknown> | null;
 }
 
 export interface BirdRef { fancierName: string; ring: string; arrivalTime: string; arrivalDay: number; speed: number }

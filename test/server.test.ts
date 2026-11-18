@@ -5,7 +5,7 @@ import type { Env } from "../src/server/env";
 import { adminRaceDetail, championship, live, raceDetail } from "../src/server/queries";
 import {
   addOverride, calculateResults, crossCheck, isLiveActive, pollLive, publish, recalculateRace,
-  revokeOverride, sastToUtc, syncRaces, updateCompetition, createCompetition, setCompetitionRace, updateRace, type Ctx, type StoredArrival,
+  revokeOverride, sastToUtc, syncRaces, updateCompetition, createCompetition, setCompetitionRace, setCompetitionRaceParams, updateRace, type Ctx, type StoredArrival,
 } from "../src/server/services";
 import { testDb } from "./helpers/d1";
 import { fakeBenzing } from "./helpers/fakeBenzing";
@@ -185,7 +185,7 @@ describe("competitions (multiple result systems)", () => {
     await expect(createCompetition(ctx, { name: "X", system: "nope" }, ADMIN, 2026)).rejects.toThrow(/Unknown scoring system/);
 
     const view = await adminRaceDetail(db, raceId, NOW);
-    expect(view.results.map((r) => r.competition.slug)).toEqual(["five-bird", "3-bird"]);
+    expect(view.results.map((r) => r.competition.slug)).toEqual(["five-bird", "weighted", "3-bird"]);
     const three = draftOf(view, "3-bird")!;
     expect(three.n).toBe(20); // 6 fanciers × 3 + Albert's 2
     expect(three.fanciers.every((f) => f.birdsScored <= 3)).toBe(true);
@@ -207,6 +207,41 @@ describe("competitions (multiple result systems)", () => {
     // Deactivated competitions disappear for members.
     await updateCompetition(ctx, comp3, { active: false }, ADMIN, 2026);
     expect((await raceDetail(db, raceId, NOW)).results.map((r) => r.competition.slug)).toEqual(["five-bird"]);
+  });
+
+  it("weighted competition: admin-only, skipped until a closing time is set, then scored per race", async () => {
+    const { db, ctx } = setup();
+    const raceId = await mooiRiverId(ctx);
+    const calc = await calculateResults(ctx, raceId, ADMIN);
+    const weighted = await db.prepare("SELECT id FROM competition WHERE slug = 'weighted'").first<{ id: number }>();
+    const wId = weighted!.id;
+    expect(calc.drafts.find((d) => d.competitionId === wId)).toMatchObject({ changed: false, skipped: expect.stringMatching(/closing day and time/) });
+
+    await expect(setCompetitionRaceParams(ctx, wId, raceId, { closingDay: 1, closingTime: "25:00" }, ADMIN)).rejects.toThrow(/HH:MM/);
+    await expect(setCompetitionRaceParams(ctx, 1, raceId, { closingDay: 1, closingTime: "16:00" }, ADMIN)).rejects.toThrow(/no per-race settings/);
+    const set = await setCompetitionRaceParams(ctx, wId, raceId, { closingDay: 1, closingTime: "16:00" }, ADMIN);
+    expect(set.changed).toBe(true);
+
+    const admin = await adminRaceDetail(db, raceId, NOW);
+    const w = admin.results.find((r) => r.competition.slug === "weighted")!;
+    expect(w.raceParams).toEqual({ closingDay: 1, closingTime: "16:00" });
+    expect(w.competition.visibility).toBe("admin");
+    expect(w.draft!.n).toBe(197);
+    expect(w.draft!.fanciers[0]).toMatchObject({ fancierName: "Glenn Mcewan", score: 73.51, points: 4778, basketed: 65 });
+
+    await publish(ctx, raceId, ADMIN, false);
+    // Members never see it…
+    const member = await raceDetail(db, raceId, NOW);
+    expect(member.results.map((r) => r.competition.slug)).toEqual(["five-bird"]);
+    await expect(championship(db, "weighted", 2026)).rejects.toThrow(/not found/);
+    // …admins do.
+    const champ = await championship(db, "weighted", 2026, { admin: true });
+    expect(champ.standings.slice(0, 2).map((s) => [s.fancierName, s.total])).toEqual([["Glenn Mcewan", 73.51], ["Scott King", 73.28]]);
+
+    // Showing it to members is one switch.
+    await updateCompetition(ctx, wId, { visibility: "members" }, ADMIN, 2026);
+    expect((await raceDetail(db, raceId, NOW)).results.map((r) => r.competition.slug)).toEqual(["five-bird", "weighted"]);
+    await expect(updateCompetition(ctx, wId, { visibility: "x" as never }, ADMIN, 2026)).rejects.toThrow(/Visibility/);
   });
 
   it("changing scoring birds creates fresh drafts; recalc without changes does nothing", async () => {

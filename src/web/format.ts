@@ -7,3 +7,6 @@ export function fmtDateTime(iso: string | null | undefined): string {
 }
 
 export const fmtKm = (km: number | null | undefined) => (km === null || km === undefined ? "–" : `${km.toLocaleString("en-ZA", { maximumFractionDigits: 1 })} km`);
+
+/** Whole numbers as-is; weighted (fractional) scores with 2 decimals. */
+export const fmtPoints = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(2));

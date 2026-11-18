@@ -5,7 +5,7 @@
 import { pickFullResult, type BenzingRace } from "../core/benzing/parseRaceList";
 import type { LiveArrival } from "../core/benzing/parseLiveArrivals";
 import type { Override, RaceCalculation } from "../core/scoring/fiveBird";
-import { getSystem } from "../core/scoring/systems";
+import { getSystem, MissingRaceSettings } from "../core/scoring/systems";
 import { BenzingClient, BenzingError, type ClubRef } from "./benzingClient";
 import { CLUB_ID, type D1Database } from "./env";
 
@@ -58,6 +58,7 @@ export interface CompetitionRow {
   system: string;
   display_order: number;
   active: number;
+  visibility: "members" | "admin";
   /** Latest version: */
   version_id: number;
   params_json: string;
@@ -149,14 +150,21 @@ export async function getRace(db: D1Database, raceId: number): Promise<RaceRow> 
   return r;
 }
 
-const COMPETITION_SQL = `SELECT c.id, c.name, c.slug, c.system, c.display_order, c.active,
+const COMPETITION_SQL = `SELECT c.id, c.name, c.slug, c.system, c.display_order, c.active, c.visibility,
     v.id AS version_id, v.params_json, v.races_counted, v.best_x, v.created_at AS version_created_at, v.actor AS version_actor
   FROM competition c JOIN competition_version v ON v.id = (SELECT MAX(id) FROM competition_version WHERE competition_id = c.id)
   WHERE c.club_id = ?`;
 
-export async function competitions(db: D1Database, opts: { activeOnly?: boolean } = {}): Promise<CompetitionRow[]> {
-  const rows = await db.prepare(`${COMPETITION_SQL}${opts.activeOnly ? " AND c.active = 1" : ""} ORDER BY c.display_order, c.id`).bind(CLUB_ID).all<CompetitionRow>();
+export async function competitions(db: D1Database, opts: { activeOnly?: boolean; membersOnly?: boolean } = {}): Promise<CompetitionRow[]> {
+  const where = `${opts.activeOnly ? " AND c.active = 1" : ""}${opts.membersOnly ? " AND c.visibility = 'members'" : ""}`;
+  const rows = await db.prepare(`${COMPETITION_SQL}${where} ORDER BY c.display_order, c.id`).bind(CLUB_ID).all<CompetitionRow>();
   return rows.results;
+}
+
+/** Per-race settings of every competition for one race (e.g. closing time). competition_id → params. */
+export async function raceParamsFor(db: D1Database, raceId: number): Promise<Map<number, Record<string, unknown>>> {
+  const rows = await db.prepare("SELECT competition_id, params_json FROM competition_race_param WHERE race_id = ?").bind(raceId).all<{ competition_id: number; params_json: string }>();
+  return new Map(rows.results.map((r) => [r.competition_id, JSON.parse(r.params_json) as Record<string, unknown>]));
 }
 
 export async function competition(db: D1Database, idOrSlug: number | string): Promise<CompetitionRow> {
@@ -291,7 +299,13 @@ async function fancierIdsByName(db: D1Database): Promise<Map<string, number>> {
 }
 
 /** Runs a competition's scoring system on stored arrivals. Fancier key = our fancier id (as text). */
-export async function scoreSnapshot(db: D1Database, arrivals: readonly StoredArrival[], comp: Pick<CompetitionRow, "system" | "params_json">, overrides: readonly Override[]) {
+export async function scoreSnapshot(
+  db: D1Database,
+  arrivals: readonly StoredArrival[],
+  comp: Pick<CompetitionRow, "system" | "params_json">,
+  overrides: readonly Override[],
+  raceParams: Record<string, unknown> | null = null,
+) {
   const ids = await fancierIdsByName(db);
   const system = getSystem(comp.system);
   return system.score(
@@ -302,21 +316,35 @@ export async function scoreSnapshot(db: D1Database, arrivals: readonly StoredArr
       speedMilli: a.speedMilli,
       benzingPosition: a.position,
       listOrder: a.listOrder,
+      arrivalDay: a.arrivalDay,
+      arrivalTime: a.arrivalTime,
+      basketed: a.loftBasketed,
     })),
     system.parse(JSON.parse(comp.params_json)),
     overrides,
+    raceParams,
   );
 }
 
 /** Creates a new draft for one competition from the latest sheet snapshot, unless nothing changed. */
-async function createDraft(db: D1Database, race: RaceRow, comp: CompetitionRow, actor: string, now: Date, warnings: string[]): Promise<{ competitionId: number; calcId: number; changed: boolean }> {
+type DraftResult = { competitionId: number; calcId: number | null; changed: boolean; skipped?: string };
+
+async function createDraft(db: D1Database, race: RaceRow, comp: CompetitionRow, actor: string, now: Date, warnings: string[]): Promise<DraftResult> {
   const snap = await latestSnapshot(db, race.id, "sheet");
   if (!snap) throw new UserError("No result sheet stored for this race yet. Press Calculate results first.");
   const overrides = await activeOverrides(db, race.id);
   const engineOverrides = overrides.map(({ scope, target, reason }) => ({ scope, target, reason }));
   const arrivals = JSON.parse(snap.arrivals_json) as StoredArrival[];
-  const calc = await scoreSnapshot(db, arrivals, comp, engineOverrides);
-  const inputsHash = await sha256(JSON.stringify({ snapshot: snap.content_sha256, system: comp.system, params: comp.params_json, overrides: engineOverrides }));
+  const raceParams = (await raceParamsFor(db, race.id)).get(comp.id) ?? null;
+  let calc;
+  try {
+    calc = await scoreSnapshot(db, arrivals, comp, engineOverrides, raceParams);
+  } catch (e) {
+    // e.g. the weighted competition has no closing time for this race yet: nothing is guessed.
+    if (e instanceof MissingRaceSettings) return { competitionId: comp.id, calcId: null, changed: false, skipped: e.message };
+    throw e;
+  }
+  const inputsHash = await sha256(JSON.stringify({ snapshot: snap.content_sha256, system: comp.system, params: comp.params_json, raceParams, overrides: engineOverrides }));
 
   const latest = await db
     .prepare("SELECT id, inputs_sha256 FROM race_calc WHERE race_id = ? AND competition_id = ? AND status IN ('draft','published') ORDER BY id DESC LIMIT 1")
@@ -346,14 +374,14 @@ async function createDraft(db: D1Database, race: RaceRow, comp: CompetitionRow, 
 
 /** Drafts for every active competition (or just one). */
 async function createDrafts(db: D1Database, race: RaceRow, actor: string, now: Date, warnings: string[], only?: number) {
-  const out = [];
+  const out: DraftResult[] = [];
   for (const comp of await competitions(db, { activeOnly: true })) {
     if (only === undefined || comp.id === only) out.push(await createDraft(db, race, comp, actor, now, warnings));
   }
   return out;
 }
 
-export async function calculateResults(ctx: Ctx, raceId: number, actor: string): Promise<{ drafts: { competitionId: number; calcId: number; changed: boolean }[]; changed: boolean; warnings: string[] }> {
+export async function calculateResults(ctx: Ctx, raceId: number, actor: string): Promise<{ drafts: DraftResult[]; changed: boolean; warnings: string[] }> {
   const now = ctx.now();
   let race = await getRace(ctx.db, raceId);
   const c = await club(ctx.db);
@@ -529,6 +557,7 @@ export async function updateRace(ctx: Ctx, raceId: number, patch: { kind?: strin
 
 export interface CompetitionInput {
   name?: string;
+  visibility?: "members" | "admin";
   params?: unknown;
   racesCounted?: "all" | "best";
   bestX?: number | null;
@@ -558,7 +587,9 @@ export async function updateCompetition(ctx: Ctx, competitionId: number, input: 
   const name = input.name?.trim() || before.name;
   const active = input.active === undefined ? before.active : input.active ? 1 : 0;
   const order = input.displayOrder ?? before.display_order;
-  await ctx.db.prepare("UPDATE competition SET name = ?, active = ?, display_order = ? WHERE id = ?").bind(name, active, order, competitionId).run();
+  const visibility = input.visibility ?? before.visibility;
+  if (visibility !== "members" && visibility !== "admin") throw new UserError("Visibility must be members or admin.");
+  await ctx.db.prepare("UPDATE competition SET name = ?, active = ?, display_order = ?, visibility = ? WHERE id = ?").bind(name, active, order, visibility, competitionId).run();
   const paramsJson = JSON.stringify(params);
   const versionChanged = paramsJson !== before.params_json || racesCounted !== before.races_counted || bestX !== before.best_x;
   if (versionChanged) {
@@ -568,15 +599,20 @@ export async function updateCompetition(ctx: Ctx, competitionId: number, input: 
       .run();
   }
   await audit(ctx.db, now, actor, "competition-update", "competition", competitionId, {
-    before: { name: before.name, params: before.params_json, racesCounted: before.races_counted, bestX: before.best_x, active: before.active },
-    after: { name, params: paramsJson, racesCounted, bestX, active },
+    before: { name: before.name, params: before.params_json, racesCounted: before.races_counted, bestX: before.best_x, active: before.active, visibility: before.visibility },
+    after: { name, params: paramsJson, racesCounted, bestX, active, visibility },
   });
   // Scoring changes alter race results: create fresh drafts for the admin to review and publish.
   if (paramsJson !== before.params_json || (active && !before.active)) return recalculateSeason(ctx, season, actor, competitionId);
   return [];
 }
 
-export async function createCompetition(ctx: Ctx, input: { name: string; system: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null }, actor: string, season: number) {
+export async function createCompetition(
+  ctx: Ctx,
+  input: { name: string; system: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null; visibility?: "members" | "admin" },
+  actor: string,
+  season: number,
+) {
   const now = ctx.now();
   let system;
   let params;
@@ -596,8 +632,8 @@ export async function createCompetition(ctx: Ctx, input: { name: string; system:
   if (taken) throw new UserError("A competition with that name already exists.");
   const maxOrder = await ctx.db.prepare("SELECT COALESCE(MAX(display_order), 0) AS m FROM competition WHERE club_id = ?").bind(CLUB_ID).first<{ m: number }>();
   const res = await ctx.db
-    .prepare("INSERT INTO competition (club_id, name, slug, system, display_order, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)")
-    .bind(CLUB_ID, name, slug, system.id, (maxOrder?.m ?? 0) + 1, iso(now))
+    .prepare("INSERT INTO competition (club_id, name, slug, system, display_order, active, created_at, visibility) VALUES (?, ?, ?, ?, ?, 1, ?, ?)")
+    .bind(CLUB_ID, name, slug, system.id, (maxOrder?.m ?? 0) + 1, iso(now), input.visibility === "admin" ? "admin" : "members")
     .run();
   const id = res.meta.last_row_id!;
   await ctx.db
@@ -607,6 +643,31 @@ export async function createCompetition(ctx: Ctx, input: { name: string; system:
   await audit(ctx.db, now, actor, "competition-create", "competition", id, { name, system: system.id, params, racesCounted, bestX });
   await recalculateSeason(ctx, season, actor, id);
   return { id, slug };
+}
+
+/** Sets a competition's per-race settings (e.g. closing time) and re-scores that race as a new draft. */
+export async function setCompetitionRaceParams(ctx: Ctx, competitionId: number, raceId: number, raw: unknown, actor: string) {
+  const comp = await competition(ctx.db, competitionId);
+  await getRace(ctx.db, raceId);
+  const system = getSystem(comp.system);
+  if (!system.parseRace) throw new UserError(`${comp.name} has no per-race settings.`);
+  let params: Record<string, unknown>;
+  try {
+    params = system.parseRace(raw);
+  } catch (e) {
+    throw new UserError((e as Error).message);
+  }
+  const before = (await raceParamsFor(ctx.db, raceId)).get(competitionId) ?? null;
+  await ctx.db
+    .prepare(
+      `INSERT INTO competition_race_param (competition_id, race_id, params_json, updated_at, actor) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(competition_id, race_id) DO UPDATE SET params_json = excluded.params_json, updated_at = excluded.updated_at, actor = excluded.actor`,
+    )
+    .bind(competitionId, raceId, JSON.stringify(params), iso(ctx.now()), actor)
+    .run();
+  await audit(ctx.db, ctx.now(), actor, "competition-race-params", "race", raceId, { competition: comp.slug, before, after: params });
+  const hasSheet = await latestSnapshot(ctx.db, raceId, "sheet");
+  return hasSheet ? recalculateRace(ctx, raceId, actor, competitionId) : { drafts: [], changed: false };
 }
 
 export async function setCompetitionRace(ctx: Ctx, competitionId: number, raceId: number, included: boolean, actor: string) {

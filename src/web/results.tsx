@@ -1,5 +1,5 @@
 import { Fragment, useState } from "react";
-import { fmtArrival, fmtSpeed } from "./format";
+import { fmtArrival, fmtPoints, fmtSpeed } from "./format";
 import type { Calc, FullRow, RaceDetail } from "./types";
 import { FancierLink, TableWrap } from "./ui";
 
@@ -26,17 +26,19 @@ export function ScoreTable({ calc, rules }: { calc: CalcView; rules?: string }) 
               <Fragment key={f.fancierId}>
                 <tr className="cursor-pointer" onClick={() => setOpen(open === f.fancierId ? null : f.fancierId)}>
                   <td className="num align-top text-muted">{f.rank ?? "="}</td>
-                  <td className="whitespace-normal">
+                  <td className="wrap">
                     <FancierLink id={f.fancierId} name={f.fancierName} />
                     <div className="text-xs text-muted">
-                      {f.birdsScored} bird{f.birdsScored === 1 ? "" : "s"} · places {f.benzingPositions.join(", ")}
+                      {f.birdsScored} bird{f.birdsScored === 1 ? "" : "s"}
+                      {f.basketed !== undefined && ` · ${f.points} pts ÷ ${f.basketed} basketed`}
+                      {f.benzingPositions.length > 0 && ` · places ${f.benzingPositions.length > 12 ? `${f.benzingPositions.slice(0, 12).join(", ")} …` : f.benzingPositions.join(", ")}`}
                     </div>
                   </td>
-                  <td className="num align-top text-base font-bold">{f.score}</td>
+                  <td className="num align-top text-base font-bold">{fmtPoints(f.score)}</td>
                 </tr>
                 {open === f.fancierId && (
                   <tr className="bg-surface-2">
-                    <td colSpan={3} className="whitespace-normal">
+                    <td colSpan={3} className="wrap">
                       <div className="py-1 text-sm">
                         {calc.lines
                           .filter((l) => l.fancierId === f.fancierId)
