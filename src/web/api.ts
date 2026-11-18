@@ -7,14 +7,46 @@ export class ApiError extends Error {
 
 import { BUILD_ID } from "../generated/build";
 
-/** Fired once when the server runs a newer build than this page. */
+/** Fired once when the server runs a different build than this page; event.detail = the server's build id. */
 export const STALE_EVENT = "qrpc:stale";
+const RELOADED_KEY = "qrpc.reloadedFor";
 let staleSent = false;
+
+function reloadedFor(): string | null {
+  try {
+    return sessionStorage.getItem(RELOADED_KEY);
+  } catch {
+    return null;
+  }
+}
+
 function checkBuild(res: Response) {
   const server = res.headers.get("X-QRPC-Build");
-  if (!staleSent && server && BUILD_ID !== "dev" && server !== BUILD_ID) {
+  // Never nag twice for the same update: if a fresh reload for this build still didn't help, stay quiet.
+  if (!staleSent && server && BUILD_ID !== "dev" && server !== BUILD_ID && reloadedFor() !== server) {
     staleSent = true;
-    window.dispatchEvent(new Event(STALE_EVENT));
+    window.dispatchEvent(new CustomEvent(STALE_EVENT, { detail: server }));
+  }
+}
+
+/** Reload bypassing any cached copy: the new build id in the address is a URL no cache has stored. */
+export function reloadFresh(serverBuild: string) {
+  try {
+    sessionStorage.setItem(RELOADED_KEY, serverBuild);
+  } catch {
+    /* private mode */
+  }
+  const url = new URL(window.location.href);
+  url.searchParams.set("_v", serverBuild);
+  window.location.replace(url.toString());
+}
+
+/** Remove the cache-busting parameter from the address bar after a fresh reload. */
+export function tidyReloadParam() {
+  const url = new URL(window.location.href);
+  if (url.searchParams.has("_v")) {
+    url.searchParams.delete("_v");
+    window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
   }
 }
 

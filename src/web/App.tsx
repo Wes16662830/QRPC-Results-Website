@@ -1,6 +1,6 @@
 import { NavLink, Navigate, Route, Routes, useLocation } from "react-router";
 import { useEffect, useState } from "react";
-import { post, STALE_EVENT } from "./api";
+import { post, reloadFresh, STALE_EVENT, tidyReloadParam } from "./api";
 import { useApi } from "./hooks";
 import { SeasonSelect } from "./season";
 import { Loading } from "./ui";
@@ -77,18 +77,22 @@ function BottomNav() {
 }
 
 function StaleBanner() {
-  const [stale, setStale] = useState(false);
+  const [server, setServer] = useState<string | null>(null);
   useEffect(() => {
-    const on = () => setStale(true);
+    tidyReloadParam();
+    const on = (e: Event) => setServer((e as CustomEvent<string>).detail ?? "new");
     window.addEventListener(STALE_EVENT, on);
     return () => window.removeEventListener(STALE_EVENT, on);
   }, []);
-  if (!stale) return null;
+  if (!server) return null;
   return (
     <div className="no-print sticky top-0 z-20 flex flex-wrap items-center justify-center gap-3 bg-accent px-4 py-2 text-sm font-semibold text-[#1b1300]">
       The site has been updated.
-      <button className="rounded-md bg-[#1b1300] px-3 py-1 text-white" onClick={() => window.location.reload()}>
+      <button className="rounded-md bg-[#1b1300] px-3 py-1 text-white" onClick={() => reloadFresh(server)}>
         Reload
+      </button>
+      <button className="px-1 text-base leading-none" aria-label="Dismiss" onClick={() => setServer(null)}>
+        ✕
       </button>
     </div>
   );
