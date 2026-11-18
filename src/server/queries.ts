@@ -462,6 +462,102 @@ export async function live(db: D1Database, now: Date) {
   return { races: out, pollIntervalMinutes: 5 };
 }
 
+/**
+ * "Season so far" facts for the home page, from published races only (a race counts once any of its
+ * results is published, so members never see figures from races still being checked).
+ */
+export async function seasonStats(db: D1Database, season: number) {
+  const races = (
+    await db
+      .prepare(
+        `SELECT r.id, r.name, r.race_date, r.basketed_total,
+                (SELECT arrivals_json FROM snapshot s WHERE s.race_id = r.id AND s.source = 'sheet' ORDER BY s.id DESC LIMIT 1) AS arrivals_json
+         FROM race r
+         WHERE r.club_id = ? AND r.season = ? AND r.kind = 'race' AND r.included = 1
+           AND EXISTS (SELECT 1 FROM race_calc c WHERE c.race_id = r.id AND c.status = 'published')
+         ORDER BY r.race_date, r.race_number`,
+      )
+      .bind(CLUB_ID, season)
+      .all<{ id: number; name: string; race_date: string; basketed_total: number | null; arrivals_json: string | null }>()
+  ).results.filter((r) => r.arrivals_json);
+  if (races.length === 0) return null;
+  const withArrivals = races.map((r) => ({ ...r, arrivals: JSON.parse(r.arrivals_json!) as StoredArrival[] }));
+
+  const basketed = races.reduce((sum, r) => sum + (r.basketed_total ?? 0), 0);
+  const home = withArrivals.reduce((sum, r) => sum + r.arrivals.length, 0);
+
+  // Fastest bird of the season.
+  let fastest: { ring: string; fancierName: string; speed: number; raceId: number; raceName: string } | null = null;
+  for (const r of withArrivals) {
+    const a = r.arrivals[0];
+    if (a && (!fastest || a.speedMilli / 1000 > fastest.speed)) fastest = { ring: a.ring, fancierName: a.fancierName, speed: a.speedMilli / 1000, raceId: r.id, raceName: r.name };
+  }
+
+  // Race wins (first bird in the full result).
+  const winsBy = new Map<string, number>();
+  for (const r of withArrivals) {
+    const a = r.arrivals[0];
+    if (a) winsBy.set(a.fancierName, (winsBy.get(a.fancierName) ?? 0) + 1);
+  }
+  const wins = [...winsBy].map(([fancierName, n]) => ({ fancierName, wins: n })).sort((a, b) => b.wins - a.wins || a.fancierName.localeCompare(b.fancierName));
+
+  // Closest finish: smallest speed gap between the winning bird and the best bird of another fancier.
+  let closest: { raceId: number; raceName: string; gap: number; first: string; second: string } | null = null;
+  for (const r of withArrivals) {
+    const a = r.arrivals[0];
+    const b = a ? r.arrivals.find((x) => x.fancierName !== a.fancierName) : undefined;
+    if (!a || !b) continue;
+    const gap = (a.speedMilli - b.speedMilli) / 1000;
+    if (!closest || gap < closest.gap) closest = { raceId: r.id, raceName: r.name, gap, first: a.fancierName, second: b.fancierName };
+  }
+
+  // Birds home in every race so far.
+  const counts = new Map<string, { ring: string; fancierName: string; n: number; bestPosition: number }>();
+  for (const r of withArrivals) {
+    for (const a of r.arrivals) {
+      const c = counts.get(a.ring) ?? { ring: a.ring, fancierName: a.fancierName, n: 0, bestPosition: Infinity };
+      c.n += 1;
+      c.bestPosition = Math.min(c.bestPosition, a.position);
+      counts.set(a.ring, c);
+    }
+  }
+  const everyRace = [...counts.values()].filter((c) => c.n === races.length).sort((a, b) => a.bestPosition - b.bestPosition || a.ring.localeCompare(b.ring));
+
+  // Return rate per fancier (min. 10 birds basketed, so a 2-from-2 doesn't top the table).
+  const entries = await db
+    .prepare(
+      `SELECT f.id, f.name, SUM(e.basketed) AS basketed, SUM(e.returned) AS returned FROM race_entry e
+       JOIN fancier f ON f.id = e.fancier_id
+       WHERE e.race_id IN (${races.map(() => "?").join(",")}) GROUP BY f.id, f.name`,
+    )
+    .bind(...races.map((r) => r.id))
+    .all<{ id: number; name: string; basketed: number; returned: number }>();
+  const returnRate = entries.results
+    .filter((e) => e.basketed >= 10)
+    .map((e) => ({ fancierId: e.id, fancierName: e.name, basketed: e.basketed, returned: e.returned, pct: Math.round((e.returned / e.basketed) * 1000) / 10 }))
+    .sort((a, b) => b.pct - a.pct || b.returned - a.returned);
+
+  // Best bird so far: the member-visible best-bird competition, if there is one.
+  const comps = await competitions(db, { activeOnly: true, membersOnly: true });
+  const birdComp = comps.find((c) => c.slug === "best-bird") ?? comps.find((c) => getSystem(c.system).entity === "bird");
+  const bestBird = birdComp ? await championship(db, birdComp.id, season) : null;
+
+  return {
+    racesFlown: races.length,
+    basketed,
+    home,
+    returnPct: basketed ? Math.round((home / basketed) * 1000) / 10 : null,
+    fastest,
+    wins: wins.slice(0, 3),
+    closest,
+    everyRace: { count: everyRace.length, top: everyRace.slice(0, 5).map(({ ring, fancierName }) => ({ ring, fancierName })) },
+    returnRate: returnRate.slice(0, 3),
+    bestBird: bestBird
+      ? { competition: bestBird.competition.name, slug: bestBird.competition.slug, top: bestBird.standings.slice(0, 3).map((s) => ({ rank: s.rank, ring: "ring" in s ? s.ring : "", fancierName: s.fancierName, total: s.total })) }
+      : null,
+  };
+}
+
 /** Home page for one season (default: the latest season with races). */
 export async function home(db: D1Database, now: Date, seasonParam?: number) {
   const season = seasonParam ?? (await defaultSeason(db, now));
@@ -495,6 +591,7 @@ export async function home(db: D1Database, now: Date, seasonParam?: number) {
     racesCounted: champ.races.length,
     nextRace: next ? raceSummary(next, isLiveActive(next, now) ? "live" : "upcoming") : null,
     liveRaces: liveNow.races.map((r) => ({ id: r.race.id, name: r.race.name, arrivals: r.arrivals.length })),
+    stats: await seasonStats(db, season),
   };
 }
 

@@ -130,6 +130,20 @@ export interface Home {
   racesCounted: number;
   nextRace: RaceSummary | null;
   liveRaces: { id: number; name: string; arrivals: number }[];
+  stats: SeasonStats | null;
+}
+
+export interface SeasonStats {
+  racesFlown: number;
+  basketed: number;
+  home: number;
+  returnPct: number | null;
+  fastest: { ring: string; fancierName: string; speed: number; raceId: number; raceName: string } | null;
+  wins: { fancierName: string; wins: number }[];
+  closest: { raceId: number; raceName: string; gap: number; first: string; second: string } | null;
+  everyRace: { count: number; top: { ring: string; fancierName: string }[] };
+  returnRate: { fancierId: number; fancierName: string; basketed: number; returned: number; pct: number }[];
+  bestBird: { competition: string; slug: string; top: { rank: number; ring: string; fancierName: string; total: number }[] } | null;
 }
 
 export interface LiveData {

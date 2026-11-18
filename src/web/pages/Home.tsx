@@ -1,9 +1,9 @@
 import { Link } from "react-router";
-import { fmtDate, fmtSpeed } from "../format";
+import { fmtDate, fmtPoints, fmtSpeed } from "../format";
 import { useApi } from "../hooks";
 import { useSeason } from "../season";
-import type { Home } from "../types";
-import { Card, ErrorBox, FancierLink, Loading, PageTitle, StateBadge } from "../ui";
+import type { Home, SeasonStats } from "../types";
+import { Card, ErrorBox, FancierLink, Loading, PageTitle, Stat, StateBadge } from "../ui";
 
 export function HomePage() {
   const { season } = useSeason();
@@ -104,6 +104,133 @@ export function HomePage() {
             <p className="text-sm text-muted">No upcoming race for {data.season} in Benzing yet.</p>
           )}
         </Card>
+      </div>
+
+      {data.stats && <SeasonSoFar stats={data.stats} season={data.season} />}
+    </>
+  );
+}
+
+/** "Season so far": fun facts from the published races. */
+function SeasonSoFar({ stats, season }: { stats: SeasonStats; season: number }) {
+  const medal = ["🥇", "🥈", "🥉"];
+  return (
+    <>
+      <h2 className="mt-8 mb-3 text-lg font-bold">{season} so far</h2>
+      <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <Stat label="Races flown" value={stats.racesFlown} />
+        <Stat label="Birds basketed" value={stats.basketed.toLocaleString("en-ZA")} />
+        <Stat label="Birds home" value={stats.home.toLocaleString("en-ZA")} />
+        <Stat label="Club return" value={stats.returnPct === null ? "–" : `${stats.returnPct}%`} />
+      </div>
+      <div className="grid gap-4 md:grid-cols-2">
+        {stats.bestBird && stats.bestBird.top.length > 0 && (
+          <Card title="Best bird so far" right={<Link to={`/championship?competition=${stats.bestBird.slug}`} className="text-sm text-muted underline">Full table</Link>}>
+            <ol className="space-y-2">
+              {stats.bestBird.top.map((b) => (
+                <li key={b.ring} className="flex items-center justify-between gap-3 text-sm">
+                  <span className="min-w-0">
+                    <span className="mr-2">{medal[b.rank - 1] ?? b.rank}</span>
+                    <span className="font-semibold">{b.ring}</span>
+                    <span className="block pl-7 text-xs text-muted">{b.fancierName}</span>
+                  </span>
+                  <span className="font-bold whitespace-nowrap">{fmtPoints(b.total)} pts</span>
+                </li>
+              ))}
+            </ol>
+          </Card>
+        )}
+
+        {stats.fastest && (
+          <Card title="Fastest bird of the season">
+            <p className="text-2xl font-bold">
+              {fmtSpeed(stats.fastest.speed)} <span className="text-base font-normal text-muted">m/min</span>
+            </p>
+            <p className="mt-1 text-sm">
+              <strong>{stats.fastest.ring}</strong> · {stats.fastest.fancierName}
+            </p>
+            <p className="text-sm text-muted">
+              at{" "}
+              <Link className="underline" to={`/races/${stats.fastest.raceId}`}>
+                {stats.fastest.raceName}
+              </Link>
+            </p>
+          </Card>
+        )}
+
+        {stats.wins.length > 0 && (
+          <Card title="Race wins" right={<span className="text-xs text-muted">first bird home</span>}>
+            <ol className="space-y-1.5">
+              {stats.wins.map((w, i) => (
+                <li key={w.fancierName} className="flex justify-between text-sm">
+                  <span>
+                    <span className="mr-2">{medal[i]}</span>
+                    {w.fancierName}
+                  </span>
+                  <span className="font-bold">
+                    {w.wins} win{w.wins === 1 ? "" : "s"}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          </Card>
+        )}
+
+        {stats.returnRate.length > 0 && (
+          <Card title="Best return rate" right={<span className="text-xs text-muted">min. 10 basketed</span>}>
+            <ol className="space-y-1.5">
+              {stats.returnRate.map((r, i) => (
+                <li key={r.fancierId} className="flex justify-between gap-3 text-sm">
+                  <span>
+                    <span className="mr-2">{medal[i]}</span>
+                    <FancierLink id={r.fancierId} name={r.fancierName} />
+                    <span className="ml-1 text-xs text-muted">
+                      {r.returned}/{r.basketed}
+                    </span>
+                  </span>
+                  <span className="font-bold">{r.pct}%</span>
+                </li>
+              ))}
+            </ol>
+          </Card>
+        )}
+
+        <Card title="Never missed a race" right={<span className="text-xs text-muted">home in all {stats.racesFlown}</span>}>
+          {stats.everyRace.count === 0 ? (
+            <p className="text-sm text-muted">No bird has come home in every race yet.</p>
+          ) : (
+            <>
+              <p className="text-2xl font-bold">
+                {stats.everyRace.count} <span className="text-base font-normal text-muted">bird{stats.everyRace.count === 1 ? "" : "s"}</span>
+              </p>
+              <ul className="mt-2 space-y-0.5 text-sm">
+                {stats.everyRace.top.map((b) => (
+                  <li key={b.ring}>
+                    <span className="font-semibold">{b.ring}</span> <span className="text-muted">· {b.fancierName}</span>
+                  </li>
+                ))}
+                {stats.everyRace.count > stats.everyRace.top.length && <li className="text-xs text-muted">…and {stats.everyRace.count - stats.everyRace.top.length} more</li>}
+              </ul>
+            </>
+          )}
+        </Card>
+
+        {stats.closest && (
+          <Card title="Closest finish">
+            <p className="text-2xl font-bold">
+              {fmtSpeed(stats.closest.gap)} <span className="text-base font-normal text-muted">m/min</span>
+            </p>
+            <p className="mt-1 text-sm">
+              between the winner and the next fancier at{" "}
+              <Link className="underline" to={`/races/${stats.closest.raceId}`}>
+                {stats.closest.raceName}
+              </Link>
+            </p>
+            <p className="text-sm text-muted">
+              {stats.closest.first} just ahead of {stats.closest.second}
+            </p>
+          </Card>
+        )}
       </div>
     </>
   );
