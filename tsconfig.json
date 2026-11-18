@@ -21,6 +21,7 @@
     "src/server",
     "test",
     "functions",
-    "worker"
+    "worker",
+    "src/generated"
   ]
 }

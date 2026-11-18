@@ -5,7 +5,21 @@ export class ApiError extends Error {
   }
 }
 
+import { BUILD_ID } from "../generated/build";
+
+/** Fired once when the server runs a newer build than this page. */
+export const STALE_EVENT = "qrpc:stale";
+let staleSent = false;
+function checkBuild(res: Response) {
+  const server = res.headers.get("X-QRPC-Build");
+  if (!staleSent && server && BUILD_ID !== "dev" && server !== BUILD_ID) {
+    staleSent = true;
+    window.dispatchEvent(new Event(STALE_EVENT));
+  }
+}
+
 async function handle<T>(res: Response): Promise<T> {
+  checkBuild(res);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new ApiError((data as { error?: string }).error ?? `Error ${res.status}`, res.status);
   return data as T;

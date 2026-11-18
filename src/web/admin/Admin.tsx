@@ -662,7 +662,7 @@ function CompetitionEditor({
   systems: SystemInfo[];
   races: RaceSummary[];
   season: number;
-  onSaved: () => void;
+  onSaved: () => Promise<unknown> | void;
   onRecalculate: (competitionId: number, name: string) => void;
 }) {
   const system = systems.find((s) => s.id === comp.system);
@@ -672,6 +672,7 @@ function CompetitionEditor({
   const [bestX, setBestX] = useState<number | null>(comp.bestX);
   const [visibility, setVisibility] = useState(comp.visibility);
   const [raceSelection, setRaceSelection] = useState(comp.raceSelection);
+  const [racesOpen, setRacesOpen] = useState(comp.raceSelection === "picked" && comp.pickedRaceIds.length === 0);
   const save = useAction();
   const raceAction = useAction();
   return (
@@ -747,35 +748,39 @@ function CompetitionEditor({
         {save.view}
       </form>
       {races.length > 0 && (
-        <details className="mt-4 text-sm" open={comp.raceSelection === "picked" && comp.pickedRaceIds.length === 0}>
+        <details className="mt-4 text-sm" open={racesOpen} onToggle={(e) => setRacesOpen((e.currentTarget as HTMLDetailsElement).open)}>
           <summary className="cursor-pointer font-semibold">
             Races in this competition
             {comp.raceSelection === "picked" && <span className="font-normal text-muted"> · {comp.pickedRaceIds.length} picked</span>}
           </summary>
           {comp.raceSelection === "picked" && (
-            <p className="mt-2 text-xs text-muted">Only the races you tick count. Ticking a race with results creates a draft – publish it on the race page or with Publish all.</p>
+            <p className="mt-2 text-xs text-muted">Only the races you tick count. Ticking a race creates a draft; it shows in the standings once published (Publish all at the top of this page).</p>
           )}
           <ul className="mt-2 grid gap-1 sm:grid-cols-2">
             {races
               .filter((r) => r.kind === "race")
-              .map((r) => (
+              .map((r) => {
+                const isOn = comp.raceSelection === "picked" ? comp.pickedRaceIds.includes(r.id) : !comp.excludedRaceIds.includes(r.id);
+                return (
                 <li key={r.id}>
                   <label className="flex items-center gap-2">
                     <input
                       type="checkbox"
-                      checked={r.included && (comp.raceSelection === "picked" ? comp.pickedRaceIds.includes(r.id) : !comp.excludedRaceIds.includes(r.id))}
+                      checked={r.included && isOn}
                       disabled={!r.included || raceAction.busy}
-                      onChange={(e) => raceAction.run(async () => {
-                        const res = await post<{ changed: boolean }>(`/api/admin/competitions/${comp.id}/races/${r.id}`, { included: e.target.checked });
-                        onSaved();
+                      // Flip the saved state (not the checkbox's momentary DOM value).
+                      onChange={() => raceAction.run(async () => {
+                        const res = await post<{ changed: boolean }>(`/api/admin/competitions/${comp.id}/races/${r.id}`, { included: !isOn });
+                        await onSaved();
                         return res;
-                      }, (res) => ((res as { changed: boolean }).changed ? "Updated – a new draft is waiting to be published." : "Updated."))}
+                      }, (res) => `${r.name} ${isOn ? "left out" : "added"}.${(res as { changed: boolean }).changed ? " A draft is waiting – Publish all at the top of the page." : ""}`)}
                     />
                     {r.name} <span className="text-muted">{fmtDate(r.date)}</span>
                     {!r.included && <span className="text-xs text-muted">(excluded on Races tab)</span>}
                   </label>
                 </li>
-              ))}
+                );
+              })}
           </ul>
           {raceAction.view}
         </details>
@@ -876,6 +881,16 @@ function SettingsPage({ season, passwordSet }: { season: number; passwordSet: bo
     <>
       <PageTitle title="Settings" />
       {panel}
+      {!publishReady && !running && (races.data ?? []).some((r) => r.draftWaiting) && (
+        <div className="mb-4">
+          <Notice>
+            {(races.data ?? []).filter((r) => r.draftWaiting).length} race(s) have drafts waiting, so the standings don't show them yet.{" "}
+            <button className="btn btn-primary ml-2" onClick={publishAll}>
+              Publish all
+            </button>
+          </Notice>
+        </div>
+      )}
       {publishReady && !running && (
         <div className="mb-4 flex flex-wrap items-center gap-3">
           <button className="btn btn-primary" onClick={publishAll}>
@@ -892,7 +907,7 @@ function SettingsPage({ season, passwordSet }: { season: number; passwordSet: bo
           systems={comps.data!.systems}
           races={races.data ?? []}
           season={season}
-          onSaved={() => comps.reload()}
+          onSaved={() => Promise.all([comps.reload(), races.reload()])}
           onRecalculate={(id, name) => void recalculate(id, name)}
         />
       ))}

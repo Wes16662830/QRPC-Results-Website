@@ -1,5 +1,6 @@
 import { NavLink, Navigate, Route, Routes, useLocation } from "react-router";
-import { post } from "./api";
+import { useEffect, useState } from "react";
+import { post, STALE_EVENT } from "./api";
 import { useApi } from "./hooks";
 import { Loading } from "./ui";
 import { HomePage } from "./pages/Home";
@@ -72,6 +73,24 @@ function BottomNav() {
   );
 }
 
+function StaleBanner() {
+  const [stale, setStale] = useState(false);
+  useEffect(() => {
+    const on = () => setStale(true);
+    window.addEventListener(STALE_EVENT, on);
+    return () => window.removeEventListener(STALE_EVENT, on);
+  }, []);
+  if (!stale) return null;
+  return (
+    <div className="no-print sticky top-0 z-20 flex flex-wrap items-center justify-center gap-3 bg-accent px-4 py-2 text-sm font-semibold text-[#1b1300]">
+      The site has been updated.
+      <button className="rounded-md bg-[#1b1300] px-3 py-1 text-white" onClick={() => window.location.reload()}>
+        Reload
+      </button>
+    </div>
+  );
+}
+
 export function App() {
   const session = useApi<{ member: boolean; admin: boolean }>("/api/session");
   const location = useLocation();
@@ -84,6 +103,7 @@ export function App() {
 
   return (
     <div className="min-h-dvh pb-20 md:pb-8">
+      <StaleBanner />
       {location.pathname !== "/login" && <Header admin={admin} member={member} />}
       <main className="mx-auto max-w-5xl px-4 py-5">
         <Routes>

@@ -6,6 +6,7 @@ import { csv, fmtArrival, whatsappRaceSummary, whatsappStandings } from "../core
 import { checkAccessJwt, isMember, logoutCookie, memberLogin, readCookie, setMemberPassword } from "./auth";
 import { BenzingClient } from "./benzingClient";
 import type { Env } from "./env";
+import { BUILD_ID } from "../generated/build";
 import {
   adminOverview, adminRaceDetail, championship, defaultSeason, fancierDetail, home, listCompetitions, listRaces, live, raceDetail, seasons,
 } from "./queries";
@@ -67,7 +68,14 @@ const adminEmail = async (request: Request, env: Env, now: Date, deps: ApiDeps) 
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_FAILURES = 10;
 
+/** Every API response carries the build id, so a page left open across a deploy can ask to reload. */
 export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}): Promise<Response> {
+  const res = await handleApiInner(request, env, deps);
+  res.headers.set("X-QRPC-Build", BUILD_ID);
+  return res;
+}
+
+async function handleApiInner(request: Request, env: Env, deps: ApiDeps = {}): Promise<Response> {
   const now = (deps.now ?? (() => new Date()))();
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "");

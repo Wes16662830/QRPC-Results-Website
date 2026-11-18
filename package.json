@@ -8,7 +8,7 @@
     "coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.web.json",
     "dev": "vite",
-    "build": "vite build",
+    "build": "node scripts/build-id.mjs && vite build",
     "preview": "npm run build && wrangler pages dev dist --port 8788",
     "db:migrate:local": "wrangler d1 migrations apply qrpc-results --local",
     "db:migrate:remote": "wrangler d1 migrations apply qrpc-results --remote",
