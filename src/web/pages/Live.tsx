@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { fmtDateTime } from "../format";
 import { useApi } from "../hooks";
-import { ScoreTable, FullResult } from "../results";
+import { CompetitionResultView, FullResult } from "../results";
 import type { LiveData } from "../types";
 import { Card, ErrorBox, Loading, Notice, PageTitle, Tabs } from "../ui";
 
@@ -47,7 +47,7 @@ export function LivePage() {
                     {r.arrivals.length === 0 ? (
                       <p className="text-sm text-muted">No birds clocked yet.</p>
                     ) : prov ? (
-                      <ScoreTable calc={prov.result} rules={prov.competition.rules} />
+                      <CompetitionResultView calc={prov.result} competition={prov.competition} />
                     ) : (
                       <FullResult rows={r.arrivals} />
                     )}

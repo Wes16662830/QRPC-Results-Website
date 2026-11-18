@@ -31,7 +31,16 @@ export interface WhatsAppRace {
   n: number;
   competitionName: string;
   url?: string;
+  /** Score unit, e.g. "Points", "Wins", "%". */
+  unit?: string;
 }
+
+const unitText = (score: number, unit = "Points") => {
+  const v = Number.isInteger(score) ? String(score) : score.toFixed(2);
+  if (unit === "%") return `${v}%`;
+  if (unit === "Wins") return `${v} win${score === 1 ? "" : "s"}`;
+  return `${v} pts`;
+};
 
 export function whatsappRaceSummary(r: WhatsAppRace): string {
   const lines = [
@@ -39,20 +48,27 @@ export function whatsappRaceSummary(r: WhatsAppRace): string {
     `${r.basketed ?? "?"} basketed · ${r.returned} home`,
   ];
   if (r.firstBird) lines.push(`1st bird: ${r.firstBird.fancierName} – ${fmtSpeed(r.firstBird.speed)} m/min`);
-  lines.push("", `*${r.competitionName}* (${r.n} scoring birds)`);
+  lines.push("", `*${r.competitionName}*${r.unit === "Points" || r.unit === undefined ? ` (${r.n} scoring birds)` : ""}`);
   let shown = 0;
   for (const f of r.fanciers) {
     shown += 1;
-    lines.push(`${f.rank ?? "="}. ${f.fancierName} – ${f.score} pts`);
+    lines.push(`${f.rank ?? "="}. ${f.fancierName} – ${unitText(f.score, r.unit)}`);
   }
   if (shown === 0) lines.push("No scoring birds.");
   if (r.url) lines.push("", r.url);
   return lines.join("\n");
 }
 
-export function whatsappStandings(season: number, competitionName: string, races: number, standings: { rank: number; fancierName: string; total: number }[], url?: string): string {
+export function whatsappStandings(
+  season: number,
+  competitionName: string,
+  races: number,
+  standings: { rank: number; fancierName: string; total: number }[],
+  url?: string,
+  unit?: string,
+): string {
   const lines = [`*QRPC ${season} – ${competitionName}*`, `After ${races} race${races === 1 ? "" : "s"}`, ""];
-  for (const s of standings) lines.push(`${s.rank}. ${s.fancierName} – ${s.total} pts`);
+  for (const s of standings) lines.push(`${s.rank}. ${s.fancierName} – ${unitText(s.total, unit)}`);
   if (url) lines.push("", url);
   return lines.join("\n");
 }

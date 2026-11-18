@@ -9,6 +9,20 @@ export function CompetitionPicker({ value, onChange, source = "/api/competitions
   const { data: raw } = useApi<CompetitionInfo[] | { competitions: CompetitionInfo[] }>(source);
   const data = raw ? (Array.isArray(raw) ? raw : raw.competitions.filter((c) => c.active)) : null;
   if (!data || data.length < 2) return null;
+  if (data.length > 4) {
+    return (
+      <div className="no-print mb-4">
+        <select className="input font-semibold" value={value} onChange={(e) => onChange(e.target.value)} aria-label="Competition">
+          {data.map((c) => (
+            <option key={c.slug} value={c.slug}>
+              {c.name}
+              {c.visibility === "admin" ? " (admin only)" : ""}
+            </option>
+          ))}
+        </select>
+      </div>
+    );
+  }
   return (
     <div className="no-print mb-4 flex flex-wrap gap-2">
       {data.map((c) => (
@@ -22,6 +36,76 @@ export function CompetitionPicker({ value, onChange, source = "/api/competitions
         </button>
       ))}
     </div>
+  );
+}
+
+/** Standings for any competition: fanciers or birds, points, wins or season percentages. */
+function StandingsTable({ data }: { data: Championship }) {
+  const c = data.competition;
+  const bird = c.entity === "bird";
+  const pct = c.unit === "%";
+  const fmt = (v: number) => (pct ? `${fmtPoints(v)}%` : fmtPoints(v));
+  const shown = bird ? data.standings.slice(0, 100) : data.standings;
+  return (
+    <>
+      <TableWrap>
+        <table className="data">
+          <thead>
+            <tr>
+              <th className="num">#</th>
+              <th>{bird ? "Bird" : "Fancier"}</th>
+              <th className="num">{pct ? "Season %" : c.unit === "Wins" ? "Wins" : "Total"}</th>
+              {pct && <th className="num">Top / basketed</th>}
+              {bird && <th className="num">Races</th>}
+              {data.races.map((r) => (
+                <th key={r.id} className="num">
+                  <Link to={`/races/${r.id}`} title={r.name}>
+                    {r.number ? `R${r.number}` : r.name.slice(0, 6)}
+                  </Link>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map((s) => (
+              <tr key={s.ring ?? s.fancierId ?? s.fancierName}>
+                <td className="num align-top text-muted">{s.rank}</td>
+                <td className={bird ? "wrap" : ""}>
+                  {bird ? (
+                    <>
+                      <span className="whitespace-nowrap font-medium">{s.ring}</span>
+                      <div className="text-xs">
+                        <FancierLink id={s.fancierId} name={s.fancierName} />
+                      </div>
+                    </>
+                  ) : (
+                    <FancierLink id={s.fancierId} name={s.fancierName} />
+                  )}
+                </td>
+                <td className="num align-top text-base font-bold">{fmt(s.total)}</td>
+                {pct && <td className="num align-top text-muted">{s.points} / {s.basketed}</td>}
+                {bird && <td className="num align-top text-muted">{s.racesScored}</td>}
+                {data.races.map((r) => {
+                  const v = s.perRace[String(r.id)];
+                  const isCounted = pct || s.countedRaceIds.includes(String(r.id));
+                  // No entry: "–". Percent races show 0% when he raced; points/wins show "–" for 0.
+                  const text = v === undefined ? "–" : pct ? fmt(v) : v ? fmt(v) : "–";
+                  return (
+                    <td key={r.id} className={`num align-top ${isCounted ? "" : "text-muted line-through"}`}>
+                      {text}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </TableWrap>
+      {bird && data.standings.length > shown.length && (
+        <p className="mt-2 text-xs text-muted">Showing the top {shown.length} of {data.standings.length} birds. The CSV has them all.</p>
+      )}
+      {pct && <p className="mt-2 text-xs text-muted">Season % = all birds in the top {String(c.params.percent ?? "")}% ÷ all birds basketed. Race columns show each race's %.</p>}
+    </>
   );
 }
 
@@ -45,44 +129,7 @@ export function ChampionshipPage({ admin = false }: { admin?: boolean }) {
       ) : (
         <Card>
           {!admin && <ExportBar csv={[[`/api/championship/export.csv?${q}`, "CSV"]]} whatsappPath={`/api/championship/whatsapp?${q}`} />}
-          <TableWrap>
-            <table className="data">
-              <thead>
-                <tr>
-                  <th className="num">#</th>
-                  <th>Fancier</th>
-                  <th className="num">Total</th>
-                  {data.races.map((r) => (
-                    <th key={r.id} className="num">
-                      <Link to={`/races/${r.id}`} title={r.name}>
-                        {r.number ? `R${r.number}` : r.name.slice(0, 6)}
-                      </Link>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {data.standings.map((s) => (
-                  <tr key={s.fancierId}>
-                    <td className="num text-muted">{s.rank}</td>
-                    <td>
-                      <FancierLink id={s.fancierId} name={s.fancierName} />
-                    </td>
-                    <td className="num text-base font-bold">{fmtPoints(s.total)}</td>
-                    {data.races.map((r) => {
-                      const v = s.perRace[String(r.id)] ?? 0;
-                      const isCounted = s.countedRaceIds.includes(String(r.id));
-                      return (
-                        <td key={r.id} className={`num ${isCounted ? "" : "text-muted line-through"}`}>
-                          {v ? fmtPoints(v) : "–"}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </TableWrap>
+          <StandingsTable data={data} />
           {c.racesCounted === "best" && <p className="mt-2 text-xs text-muted">Struck-through scores are not counted (best {c.bestX}).</p>}
         </Card>
       )}

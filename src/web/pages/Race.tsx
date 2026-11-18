@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useParams } from "react-router";
 import { fmtArrival, fmtDate, fmtDateTime, fmtKm, fmtSpeed } from "../format";
 import { useApi } from "../hooks";
-import { EntriesTable, ScoreTable, FullResult, ScoringBirds } from "../results";
+import { CompetitionResultView, EntriesTable, FullResult, ScoringBirds } from "../results";
 import { ExportBar } from "../share";
 import type { RaceDetail } from "../types";
 import { Card, ErrorBox, Loading, Notice, PageTitle, Stat, StateBadge, Tabs } from "../ui";
@@ -56,13 +56,15 @@ export function RacePage() {
                 csv={[[`/api/races/${race.id}/result.csv?competition=${compResult.competition.slug}`, "CSV"]]}
                 whatsappPath={`/api/races/${race.id}/whatsapp?competition=${compResult.competition.slug}`}
               />
-              <ScoreTable calc={compResult.published} rules={compResult.competition.rules} />
+              <CompetitionResultView calc={compResult.published} competition={compResult.competition} />
+              {compResult.competition.entity === "fancier" && compResult.competition.unit === "Points" && (
               <details className="mt-4">
                 <summary className="cursor-pointer text-sm font-semibold">All {compResult.published.n} scoring birds</summary>
                 <div className="mt-3">
                   <ScoringBirds calc={compResult.published} />
                 </div>
               </details>
+              )}
               <p className="mt-4 text-xs text-muted">Published {fmtDateTime(compResult.published.publishedAt)}.</p>
             </>
           ) : (

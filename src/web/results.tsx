@@ -1,16 +1,31 @@
 import { Fragment, useState } from "react";
 import { fmtArrival, fmtPoints, fmtSpeed } from "./format";
-import type { Calc, FullRow, RaceDetail } from "./types";
+import type { Calc, CompetitionInfo, FullRow, RaceDetail } from "./types";
 import { FancierLink, TableWrap } from "./ui";
 
 type CalcView = Pick<Calc, "n" | "lines" | "fanciers" | "excluded">;
 
-export function ScoreTable({ calc, rules }: { calc: CalcView; rules?: string }) {
+/** Result of one competition for one race: birds for bird competitions, fanciers otherwise. */
+export function CompetitionResultView({ calc, competition }: { calc: CalcView; competition: Pick<CompetitionInfo, "entity" | "unit" | "rules" | "params"> }) {
+  if (competition.entity === "bird") {
+    return (
+      <>
+        <p className="mb-3 text-sm text-muted">{competition.rules}</p>
+        <ScoringBirds calc={calc} />
+      </>
+    );
+  }
+  return <ScoreTable calc={calc} rules={competition.rules} unit={competition.unit} percent={Number(competition.params.percent) || undefined} />;
+}
+
+export function ScoreTable({ calc, rules, unit = "Points", percent }: { calc: CalcView; rules?: string; unit?: string; percent?: number }) {
   const [open, setOpen] = useState<string | null>(null);
+  const fmt = (v: number) => (unit === "%" ? `${fmtPoints(v)}%` : fmtPoints(v));
   return (
     <>
       <p className="mb-3 text-sm text-muted">
-        {calc.n} scoring birds. {rules}
+        {unit === "Points" ? `${calc.n} scoring birds. ` : ""}
+        {rules}
       </p>
       <TableWrap>
         <table className="data">
@@ -18,7 +33,7 @@ export function ScoreTable({ calc, rules }: { calc: CalcView; rules?: string }) 
             <tr>
               <th className="num">#</th>
               <th>Fancier</th>
-              <th className="num">Points</th>
+              <th className="num">{unit}</th>
             </tr>
           </thead>
           <tbody>
@@ -29,12 +44,17 @@ export function ScoreTable({ calc, rules }: { calc: CalcView; rules?: string }) 
                   <td className="wrap">
                     <FancierLink id={f.fancierId} name={f.fancierName} />
                     <div className="text-xs text-muted">
-                      {f.birdsScored} bird{f.birdsScored === 1 ? "" : "s"}
-                      {f.basketed !== undefined && ` · ${f.points} pts ÷ ${f.basketed} basketed`}
+                      {unit === "%"
+                        ? `${f.points} of ${f.basketed} basketed in the top ${percent ?? "X"}%`
+                        : unit === "Wins"
+                          ? f.score
+                            ? "first bird home"
+                            : ""
+                          : `${f.birdsScored} bird${f.birdsScored === 1 ? "" : "s"}${f.basketed !== undefined ? ` · ${f.points} pts ÷ ${f.basketed} basketed` : ""}`}
                       {f.benzingPositions.length > 0 && ` · places ${f.benzingPositions.length > 12 ? `${f.benzingPositions.slice(0, 12).join(", ")} …` : f.benzingPositions.join(", ")}`}
                     </div>
                   </td>
-                  <td className="num align-top text-base font-bold">{fmtPoints(f.score)}</td>
+                  <td className="num align-top text-base font-bold">{fmt(f.score)}</td>
                 </tr>
                 {open === f.fancierId && (
                   <tr className="bg-surface-2">
@@ -93,7 +113,7 @@ export function ScoringBirds({ calc }: { calc: CalcView }) {
               <td className="text-muted">{l.ring}</td>
               <td className="num text-muted">{l.benzingPosition}</td>
               <td className="num">{fmtSpeed(l.speed)}</td>
-              <td className="num font-semibold">{l.points}</td>
+              <td className="num font-semibold">{fmtPoints(l.points)}</td>
             </tr>
           ))}
         </tbody>

@@ -67,14 +67,14 @@ export function StateBadge({ state }: { state: RaceState }) {
 
 export function Tabs<T extends string>({ value, onChange, tabs }: { value: T; onChange: (t: T) => void; tabs: [T, string][] }) {
   return (
-    <div className="no-print mb-3 flex gap-1 rounded-lg bg-surface-2 p-1" role="tablist">
+    <div className="no-print mb-3 flex gap-1 overflow-x-auto rounded-lg bg-surface-2 p-1" role="tablist">
       {tabs.map(([key, label]) => (
         <button
           key={key}
           role="tab"
           aria-selected={value === key}
           onClick={() => onChange(key)}
-          className={`flex-1 rounded-md px-3 py-2 text-sm font-semibold ${value === key ? "bg-surface text-ink shadow-sm" : "text-muted"}`}
+          className={`flex-1 whitespace-nowrap rounded-md px-3 py-2 text-sm font-semibold ${value === key ? "bg-surface text-ink shadow-sm" : "text-muted"}`}
         >
           {label}
         </button>
@@ -83,8 +83,8 @@ export function Tabs<T extends string>({ value, onChange, tabs }: { value: T; on
   );
 }
 
-export function FancierLink({ id, name }: { id: string | number; name: string }) {
-  if (!/^\d+$/.test(String(id))) return <>{name}</>;
+export function FancierLink({ id, name }: { id: string | number | null; name: string }) {
+  if (id === null || !/^\d+$/.test(String(id))) return <>{name}</>;
   return (
     <Link to={`/fanciers/${id}`} className="font-medium text-ink underline decoration-line underline-offset-2 hover:decoration-accent">
       {name}

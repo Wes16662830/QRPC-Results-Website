@@ -60,6 +60,10 @@ export interface CompetitionInfo {
   active: boolean;
   displayOrder: number;
   visibility: "members" | "admin";
+  raceSelection: "all" | "picked";
+  entity: "fancier" | "bird";
+  seasonMode: "sum" | "ratio";
+  unit: string;
   raceFields: { key: string; label: string; type: "integer" | "time"; min?: number; max?: number; help?: string }[];
 }
 
@@ -69,6 +73,8 @@ export interface CompetitionResult {
   draft: Calc | null;
   /** Admin only: this race's settings for the competition (e.g. closing time). */
   raceParams?: Record<string, unknown> | null;
+  /** Admin only: false when the competition doesn't use this race (e.g. not picked for a distance band). */
+  usesRace?: boolean;
 }
 
 export interface BirdRef { fancierName: string; ring: string; arrivalTime: string; arrivalDay: number; speed: number }
@@ -94,7 +100,20 @@ export interface AdminRaceDetail extends RaceDetail {
   fullResultId: number | null;
 }
 
-export interface Standing { rank: number; fancierId: number; fancierName: string; total: number; perRace: Record<string, number>; countedRaceIds: string[] }
+export interface Standing {
+  rank: number;
+  fancierId: number | null;
+  fancierName: string;
+  total: number;
+  perRace: Record<string, number>;
+  countedRaceIds: string[];
+  /** Bird competitions */
+  ring?: string;
+  racesScored?: number;
+  /** Ratio competitions: counted birds and birds basketed over the season */
+  points?: number;
+  basketed?: number;
+}
 
 export interface Championship {
   season: number;

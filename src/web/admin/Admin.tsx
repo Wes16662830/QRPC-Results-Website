@@ -4,7 +4,7 @@ import { ApiError, post } from "../api";
 import { fmtDate, fmtDateTime } from "../format";
 import { useApi } from "../hooks";
 import { ChampionshipPage } from "../pages/Championship";
-import { ScoreTable } from "../results";
+import { CompetitionResultView } from "../results";
 import type { AdminRaceDetail, CompetitionInfo, CompetitionResult, RaceSummary } from "../types";
 import { Card, ErrorBox, Loading, Notice, PageTitle, StateBadge, TableWrap } from "../ui";
 
@@ -440,7 +440,12 @@ function AdminRace() {
           {drafts.map((r) => (
             <div key={r.competition.slug} className="mb-5">
               <h3 className="mb-2 font-semibold">{r.competition.name}</h3>
-              <ScoreTable calc={r.draft!} rules={r.competition.rules} />
+              <details open={drafts.length <= 2}>
+                <summary className="cursor-pointer text-sm text-muted">Show draft</summary>
+                <div className="mt-2">
+                  <CompetitionResultView calc={r.draft!} competition={r.competition} />
+                </div>
+              </details>
             </div>
           ))}
           <button
@@ -458,15 +463,38 @@ function AdminRace() {
         <RaceParamsCard key={`params-${r.competition.slug}-${JSON.stringify(r.raceParams)}`} raceId={race.id} result={r} onSaved={reload} />
       ))}
 
-      {data.results.map((r) => (
-        <Card
-          key={r.competition.slug}
-          title={`Published: ${r.competition.name}${r.competition.active ? "" : " (inactive)"}${r.competition.visibility === "admin" ? " (admin only)" : ""}`}
-          className="mb-4"
-        >
-          {r.published ? <ScoreTable calc={r.published} /> : <p className="text-sm text-muted">Nothing published yet.</p>}
-        </Card>
-      ))}
+      <Card title="Published results" className="mb-4">
+        <ul className="divide-y divide-line">
+          {data.results.map((r) => (
+            <li key={r.competition.slug} className="py-2">
+              <details>
+                <summary className="cursor-pointer text-sm">
+                  <strong>{r.competition.name}</strong>
+                  {r.competition.visibility === "admin" && <span className="text-muted"> · admin only</span>}
+                  {!r.competition.active && <span className="text-muted"> · inactive</span>}
+                  <span className="text-muted">
+                    {" · "}
+                    {r.usesRace === false
+                      ? r.competition.raceSelection === "picked"
+                        ? "race not picked for this competition (Settings)"
+                        : "race left out of this competition (Settings)"
+                      : r.published
+                        ? `published ${fmtDateTime(r.published.publishedAt)}`
+                        : r.competition.raceFields.length && !r.raceParams
+                          ? "needs race settings above"
+                          : "not published yet"}
+                  </span>
+                </summary>
+                {r.published && (
+                  <div className="mt-3">
+                    <CompetitionResultView calc={r.published} competition={r.competition} />
+                  </div>
+                )}
+              </details>
+            </li>
+          ))}
+        </ul>
+      </Card>
 
       <Card title="Disqualifications" className="mb-4">
         <p className="mb-3 text-sm text-muted">The bird (or all of a fancier's birds) is removed before scoring, so that fancier's next bird moves up. A new draft is created for you to publish.</p>
@@ -532,6 +560,7 @@ function AdminRace() {
 
 interface AdminCompetition extends CompetitionInfo {
   excludedRaceIds: number[];
+  pickedRaceIds: number[];
 }
 interface SystemInfo {
   id: string;
@@ -548,6 +577,7 @@ function CompetitionEditor({ comp, systems, races, season, onSaved }: { comp: Ad
   const [racesCounted, setRacesCounted] = useState(comp.racesCounted);
   const [bestX, setBestX] = useState<number | null>(comp.bestX);
   const [visibility, setVisibility] = useState(comp.visibility);
+  const [raceSelection, setRaceSelection] = useState(comp.raceSelection);
   const save = useAction();
   const raceAction = useAction();
   return (
@@ -557,7 +587,7 @@ function CompetitionEditor({ comp, systems, races, season, onSaved }: { comp: Ad
         onSubmit={(e) => {
           e.preventDefault();
           void save.run(async () => {
-            const r = await post<{ newDrafts: number }>(`/api/admin/competitions/${comp.id}`, { name, params, racesCounted, bestX, visibility, season });
+            const r = await post<{ newDrafts: number }>(`/api/admin/competitions/${comp.id}`, { name, params, racesCounted, bestX, visibility, raceSelection, season });
             onSaved();
             return r;
           }, (r) => {
@@ -583,19 +613,28 @@ function CompetitionEditor({ comp, systems, races, season, onSaved }: { comp: Ad
             <option value="admin">Admins only</option>
           </select>
         </label>
+        <label className="block">
+          Races used
+          <select className="input mt-1" value={raceSelection} onChange={(e) => setRaceSelection(e.target.value as "all" | "picked")}>
+            <option value="all">All included races</option>
+            <option value="picked">Only races I pick (below)</option>
+          </select>
+        </label>
         {comp.raceFields.length > 0 && (
           <p className="text-xs text-muted sm:col-span-2">
             {comp.raceFields.map((f) => f.label).join(" and ")} are set per race, on each race's admin page.
           </p>
         )}
+        {comp.seasonMode === "sum" && (
         <label className="block">
           Races counted
           <select className="input mt-1" value={racesCounted} onChange={(e) => setRacesCounted(e.target.value as "all" | "best")}>
             <option value="all">All included races</option>
-            <option value="best">Best X races per fancier</option>
+            <option value="best">{comp.entity === "bird" ? "Best X races per bird" : "Best X races per fancier"}</option>
           </select>
         </label>
-        {racesCounted === "best" && (
+        )}
+        {comp.seasonMode === "sum" && racesCounted === "best" && (
           <label className="block">
             X (best races counted)
             <input className="input mt-1" type="number" min={1} value={bestX ?? ""} onChange={(e) => setBestX(Number(e.target.value) || null)} />
@@ -620,8 +659,14 @@ function CompetitionEditor({ comp, systems, races, season, onSaved }: { comp: Ad
         {save.view}
       </form>
       {races.length > 0 && (
-        <details className="mt-4 text-sm">
-          <summary className="cursor-pointer font-semibold">Races in this competition</summary>
+        <details className="mt-4 text-sm" open={comp.raceSelection === "picked" && comp.pickedRaceIds.length === 0}>
+          <summary className="cursor-pointer font-semibold">
+            Races in this competition
+            {comp.raceSelection === "picked" && <span className="font-normal text-muted"> · {comp.pickedRaceIds.length} picked</span>}
+          </summary>
+          {comp.raceSelection === "picked" && (
+            <p className="mt-2 text-xs text-muted">Only the races you tick count. Ticking a race with results creates a draft – publish it on the race page or with Publish all.</p>
+          )}
           <ul className="mt-2 grid gap-1 sm:grid-cols-2">
             {races
               .filter((r) => r.kind === "race")
@@ -630,12 +675,13 @@ function CompetitionEditor({ comp, systems, races, season, onSaved }: { comp: Ad
                   <label className="flex items-center gap-2">
                     <input
                       type="checkbox"
-                      checked={r.included && !comp.excludedRaceIds.includes(r.id)}
+                      checked={r.included && (comp.raceSelection === "picked" ? comp.pickedRaceIds.includes(r.id) : !comp.excludedRaceIds.includes(r.id))}
                       disabled={!r.included || raceAction.busy}
                       onChange={(e) => raceAction.run(async () => {
-                        await post(`/api/admin/competitions/${comp.id}/races/${r.id}`, { included: e.target.checked });
+                        const res = await post<{ changed: boolean }>(`/api/admin/competitions/${comp.id}/races/${r.id}`, { included: e.target.checked });
                         onSaved();
-                      }, "Updated.")}
+                        return res;
+                      }, (res) => ((res as { changed: boolean }).changed ? "Updated – a new draft is waiting to be published." : "Updated."))}
                     />
                     {r.name} <span className="text-muted">{fmtDate(r.date)}</span>
                     {!r.included && <span className="text-xs text-muted">(excluded on Races tab)</span>}
@@ -656,6 +702,7 @@ function NewCompetition({ systems, season, onCreated }: { systems: SystemInfo[];
   const system = systems.find((s) => s.id === systemId);
   const [params, setParams] = useState<Record<string, unknown>>(system?.defaults ?? {});
   const [visibility, setVisibility] = useState<"members" | "admin">("admin");
+  const [raceSelection, setRaceSelection] = useState<"all" | "picked">("all");
   const create = useAction();
   return (
     <Card title="Add a competition">
@@ -664,7 +711,7 @@ function NewCompetition({ systems, season, onCreated }: { systems: SystemInfo[];
         onSubmit={(e) => {
           e.preventDefault();
           void create.run(async () => {
-            await post("/api/admin/competitions", { name, system: systemId, params, visibility, season });
+            await post("/api/admin/competitions", { name, system: systemId, params, visibility, raceSelection, season });
             setName("");
             onCreated();
           }, "Created. Drafts were made for every race with stored results. Review and publish them.");
@@ -695,6 +742,13 @@ function NewCompetition({ systems, season, onCreated }: { systems: SystemInfo[];
           <select className="input mt-1" value={visibility} onChange={(e) => setVisibility(e.target.value as "members" | "admin")}>
             <option value="admin">Admins only (while you check it)</option>
             <option value="members">Members and admins</option>
+          </select>
+        </label>
+        <label className="block">
+          Races used
+          <select className="input mt-1" value={raceSelection} onChange={(e) => setRaceSelection(e.target.value as "all" | "picked")}>
+            <option value="all">All included races</option>
+            <option value="picked">Only races I pick (e.g. a distance band)</option>
           </select>
         </label>
         {system && (system.raceFields ?? []).length > 0 && (

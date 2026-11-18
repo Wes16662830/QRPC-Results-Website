@@ -124,11 +124,22 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     if (path === "/api/championship") return json(await championship(db, compParam, await seasonParam()));
     if (path === "/api/championship/export.csv" || path === "/api/championship/whatsapp") {
       const c = await championship(db, compParam, await seasonParam());
-      if (path.endsWith("whatsapp")) return json({ text: whatsappStandings(c.season, c.competition.name, c.races.length, c.standings, url.origin) });
+      const bird = c.competition.entity === "bird";
+      const label = (s: (typeof c.standings)[number]) => ("ring" in s && s.ring ? `${s.ring} (${s.fancierName})` : s.fancierName);
+      if (path.endsWith("whatsapp")) {
+        return json({
+          text: whatsappStandings(c.season, c.competition.name, c.races.length, c.standings.slice(0, bird ? 10 : undefined).map((s) => ({ ...s, fancierName: label(s) })), url.origin, c.competition.unit),
+        });
+      }
       return csvResponse(
         csv([
-          ["Place", "Fancier", ...c.races.map((r) => r.name), "Total"],
-          ...c.standings.map((s) => [s.rank, s.fancierName, ...c.races.map((r) => s.perRace[String(r.id)] ?? 0), s.total]),
+          [...["Place"], ...(bird ? ["Ring", "Fancier"] : ["Fancier"]), ...c.races.map((r) => r.name), `Total (${c.competition.unit})`],
+          ...c.standings.map((s) => [
+            s.rank,
+            ...(bird ? [("ring" in s && s.ring) || "", s.fancierName] : [s.fancierName]),
+            ...c.races.map((r) => s.perRace[String(r.id)] ?? 0),
+            s.total,
+          ]),
         ]),
         `qrpc-${c.season}-${c.competition.slug}.csv`,
       );
@@ -164,10 +175,15 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     if (r) {
       const d = await raceDetail(db, Number(r[1]), now);
       const res = pickResult(d.results, compParam);
+      // Bird competitions list the top 10 birds instead of fanciers.
+      const rows =
+        res.competition.entity === "bird"
+          ? res.published.lines.slice(0, 10).map((l, i) => ({ rank: i + 1, fancierName: `${l.ring} (${l.fancierName})`, score: l.points, birdsScored: 1 }))
+          : res.published.fanciers;
       return json({
         text: whatsappRaceSummary({
           name: d.race.name, date: d.race.date, basketed: d.race.basketed, returned: d.returned, firstBird: d.firstBird,
-          fanciers: res.published.fanciers, n: res.published.n, competitionName: res.competition.name, url: `${url.origin}/races/${d.race.id}`,
+          fanciers: rows, n: res.published.n, competitionName: res.competition.name, url: `${url.origin}/races/${d.race.id}`, unit: res.competition.unit,
         }),
       });
     }
@@ -227,19 +243,21 @@ async function adminRoutes(
   }
   if (path === "/api/admin/competitions") {
     if (post) {
-      const b = await body<{ name: string; system: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null; visibility?: "members" | "admin"; season?: number }>(request);
+      const b = await body<{ name: string; system: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null; visibility?: "members" | "admin"; raceSelection?: "all" | "picked"; season?: number }>(request);
       return json(await createCompetition(ctx, b, actor, Number(b.season) || (await seasonParam())));
     }
     const comps = await listCompetitions(db, { activeOnly: false });
     const exclusions = await db.prepare("SELECT competition_id, race_id FROM competition_exclusion").all<{ competition_id: number; race_id: number }>();
+    const inclusions = await db.prepare("SELECT competition_id, race_id FROM competition_inclusion").all<{ competition_id: number; race_id: number }>();
+    const of = (rows: { competition_id: number; race_id: number }[], id: number) => rows.filter((e) => e.competition_id === id).map((e) => e.race_id);
     return json({
-      competitions: comps.map((c) => ({ ...c, excludedRaceIds: exclusions.results.filter((e) => e.competition_id === c.id).map((e) => e.race_id) })),
-      systems: Object.values(SYSTEMS).map((s) => ({ id: s.id, name: s.name, fields: s.fields, defaults: s.defaults, raceFields: s.raceFields ?? [] })),
+      competitions: comps.map((c) => ({ ...c, excludedRaceIds: of(exclusions.results, c.id), pickedRaceIds: of(inclusions.results, c.id) })),
+      systems: Object.values(SYSTEMS).map((s) => ({ id: s.id, name: s.name, fields: s.fields, defaults: s.defaults, raceFields: s.raceFields ?? [], entity: s.entity, season: s.season })),
     });
   }
   let c = m(/^\/api\/admin\/competitions\/(\d+)$/);
   if (c && post) {
-    const b = await body<{ name?: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null; active?: boolean; displayOrder?: number; visibility?: "members" | "admin"; season?: number }>(request);
+    const b = await body<{ name?: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null; active?: boolean; displayOrder?: number; visibility?: "members" | "admin"; raceSelection?: "all" | "picked"; season?: number }>(request);
     const drafts = await updateCompetition(ctx, Number(c[1]), b, actor, Number(b.season) || (await seasonParam()));
     return json({ ok: true, newDrafts: drafts.filter((d) => d.changed).length });
   }
@@ -251,8 +269,7 @@ async function adminRoutes(
   c = m(/^\/api\/admin\/competitions\/(\d+)\/races\/(\d+)$/);
   if (c && post) {
     const b = await body<{ included: boolean }>(request);
-    await setCompetitionRace(ctx, Number(c[1]), Number(c[2]), Boolean(b.included), actor);
-    return json({ ok: true });
+    return json(await setCompetitionRace(ctx, Number(c[1]), Number(c[2]), Boolean(b.included), actor));
   }
   if (path === "/api/admin/member-password" && post) {
     const { password } = await body<{ password?: string }>(request);

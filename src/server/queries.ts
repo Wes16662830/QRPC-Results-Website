@@ -1,9 +1,10 @@
 /** Read models for the site. Members only ever see PUBLISHED 5-bird results. */
 import { calculateSeason } from "../core/scoring/fiveBird";
+import { ratioSeason } from "../core/scoring/extraSystems";
 import { getSystem, MissingRaceSettings } from "../core/scoring/systems";
 import { CLUB_ID, type D1Database } from "./env";
 import {
-  competition as loadCompetition, competitionExclusions, competitions, getRace, isLiveActive, raceParamsFor, sastDate, scoreSnapshot, UserError,
+  competition as loadCompetition, competitionExclusions, competitionInclusions, competitionUsesRace, competitions, getRace, isLiveActive, raceParamsFor, sastDate, scoreSnapshot, UserError,
   type CalcRow, type CompetitionRow, type RaceRow, type StoredArrival, type StoredCalcResult,
 } from "./services";
 
@@ -24,6 +25,10 @@ export function competitionInfo(c: CompetitionRow) {
     active: c.active === 1,
     displayOrder: c.display_order,
     visibility: c.visibility,
+    raceSelection: c.race_selection,
+    entity: system.entity,
+    seasonMode: system.season,
+    unit: system.unit,
     /** Settings the admin sets per race (e.g. closing time); empty for most systems. */
     raceFields: system.raceFields ?? [],
   };
@@ -197,9 +202,11 @@ async function buildRaceDetail(db: D1Database, raceId: number, now: Date, opts: 
   const raceParams = opts.admin ? await raceParamsFor(db, raceId) : new Map<number, Record<string, unknown>>();
   const results = [];
   for (const comp of comps) {
+    const uses = await competitionUsesRace(db, comp, raceId);
+    if (!opts.admin && !uses) continue;
     const published = await loadCalc(comp.id, "published");
     const draft = opts.admin ? await loadCalc(comp.id, "draft") : null;
-    results.push({ competition: competitionInfo(comp), published, draft, raceParams: raceParams.get(comp.id) ?? null });
+    results.push({ competition: competitionInfo(comp), published, draft, raceParams: raceParams.get(comp.id) ?? null, usesRace: uses });
   }
 
   const first = arrivals[0];
@@ -248,6 +255,8 @@ export async function championship(db: D1Database, competitionRef: number | stri
   const comp =
     competitionRef === null ? (await competitions(db, { activeOnly: true, membersOnly: !opts.admin }))[0]! : await loadCompetition(db, competitionRef);
   if (!opts.admin && comp.visibility !== "members") throw new UserError("Competition not found", 404);
+  const system = getSystem(comp.system);
+  const picked = comp.race_selection === "picked" ? await competitionInclusions(db, comp.id) : null;
   const excluded = await competitionExclusions(db, comp.id);
   const races = (
     await db
@@ -259,27 +268,86 @@ export async function championship(db: D1Database, competitionRef: number | stri
       )
       .bind(comp.id, CLUB_ID, season)
       .all<{ id: number; name: string; race_date: string; race_number: number | null; calc_id: number }>()
-  ).results.filter((r) => !excluded.has(r.id));
+  ).results.filter((r) => (picked ? picked.has(r.id) : !excluded.has(r.id)));
+  const names = await fancierNames(db);
+  const racesCounted = comp.races_counted === "all" ? ("all" as const) : { best: comp.best_x ?? races.length };
+  const base = {
+    season,
+    competition: competitionInfo(comp),
+    races: races.map((r) => ({ id: r.id, name: r.name, date: r.race_date, number: r.race_number })),
+  };
+
+  if (system.entity === "bird") {
+    // Bird standings: points add up per ring, from the published race results.
+    const calcs = races.length
+      ? await db
+          .prepare(`SELECT id, result_json FROM race_calc WHERE id IN (${races.map(() => "?").join(",")})`)
+          .bind(...races.map((r) => r.calc_id))
+          .all<{ id: number; result_json: string }>()
+      : { results: [] };
+    const owner = new Map<string, string>();
+    const perRace = races.map((r) => {
+      const calc = JSON.parse(calcs.results.find((c) => c.id === r.calc_id)!.result_json) as StoredCalcResult;
+      for (const l of calc.lines) owner.set(l.ring, l.fancierKey);
+      return { raceId: String(r.id), scores: calc.lines.map((l) => ({ fancierKey: l.ring, score: l.points })) };
+    });
+    const standings = calculateSeason(perRace, { racesCounted });
+    return {
+      ...base,
+      standings: standings.map((s) => {
+        const fk = owner.get(s.fancierKey) ?? "";
+        return {
+          rank: s.rank,
+          ring: s.fancierKey,
+          fancierId: /^\d+$/.test(fk) ? Number(fk) : null,
+          fancierName: names.get(fk) ?? fk.replace(/^name:/, ""),
+          total: s.total,
+          perRace: s.perRace,
+          countedRaceIds: s.countedRaceIds,
+          racesScored: Object.values(s.perRace).filter((v) => v > 0).length,
+        };
+      }),
+    };
+  }
+
   const scores = await db
     .prepare(
-      `SELECT s.race_calc_id, s.fancier_id, s.score FROM race_calc_score s
+      `SELECT s.race_calc_id, s.fancier_id, s.score, s.points, s.basketed FROM race_calc_score s
        JOIN race_calc c ON c.id = s.race_calc_id AND c.status = 'published' AND c.competition_id = ?
        JOIN race r ON r.id = c.race_id WHERE r.club_id = ? AND r.season = ?`,
     )
     .bind(comp.id, CLUB_ID, season)
-    .all<{ race_calc_id: number; fancier_id: number; score: number }>();
-  const names = await fancierNames(db);
+    .all<{ race_calc_id: number; fancier_id: number; score: number; points: number | null; basketed: number | null }>();
+  const forRace = (calcId: number) => scores.results.filter((s) => s.race_calc_id === calcId);
+
+  if (system.season === "ratio") {
+    const standings = ratioSeason(
+      races.map((r) => ({
+        raceId: String(r.id),
+        scores: forRace(r.calc_id).map((s) => ({ fancierKey: String(s.fancier_id), points: s.points ?? 0, basketed: s.basketed ?? 0 })),
+      })),
+    );
+    return {
+      ...base,
+      standings: standings.map((s) => ({
+        rank: s.rank,
+        fancierId: Number(s.fancierKey),
+        fancierName: names.get(s.fancierKey) ?? "?",
+        total: s.total,
+        points: s.points,
+        basketed: s.basketed,
+        perRace: s.perRace,
+        countedRaceIds: s.countedRaceIds,
+      })),
+    };
+  }
+
   const standings = calculateSeason(
-    races.map((r) => ({
-      raceId: String(r.id),
-      scores: scores.results.filter((s) => s.race_calc_id === r.calc_id).map((s) => ({ fancierKey: String(s.fancier_id), score: s.score })),
-    })),
-    { racesCounted: comp.races_counted === "all" ? "all" : { best: comp.best_x ?? races.length } },
+    races.map((r) => ({ raceId: String(r.id), scores: forRace(r.calc_id).map((s) => ({ fancierKey: String(s.fancier_id), score: s.score })) })),
+    { racesCounted },
   );
   return {
-    season,
-    competition: competitionInfo(comp),
-    races: races.map((r) => ({ id: r.id, name: r.name, date: r.race_date, number: r.race_number })),
+    ...base,
     standings: standings.map((s) => ({
       rank: s.rank,
       fancierId: Number(s.fancierKey),
@@ -302,7 +370,8 @@ export async function fancierDetail(db: D1Database, fancierId: number, season: n
     )
     .bind(fancierId, season)
     .all<{ id: number; name: string; race_date: string; kind: string; included: number; basketed: number; returned: number }>();
-  const comps = await competitions(db, { activeOnly: true, membersOnly: true });
+  // Bird competitions rank birds, not fanciers, so they are left off the fancier page.
+  const comps = (await competitions(db, { activeOnly: true, membersOnly: true })).filter((c) => getSystem(c.system).entity === "fancier");
   const published = await db
     .prepare(
       `SELECT c.race_id, c.competition_id, c.result_json FROM race_calc c JOIN race r ON r.id = c.race_id

@@ -59,6 +59,7 @@ export interface CompetitionRow {
   display_order: number;
   active: number;
   visibility: "members" | "admin";
+  race_selection: "all" | "picked";
   /** Latest version: */
   version_id: number;
   params_json: string;
@@ -150,7 +151,7 @@ export async function getRace(db: D1Database, raceId: number): Promise<RaceRow> 
   return r;
 }
 
-const COMPETITION_SQL = `SELECT c.id, c.name, c.slug, c.system, c.display_order, c.active, c.visibility,
+const COMPETITION_SQL = `SELECT c.id, c.name, c.slug, c.system, c.display_order, c.active, c.visibility, c.race_selection,
     v.id AS version_id, v.params_json, v.races_counted, v.best_x, v.created_at AS version_created_at, v.actor AS version_actor
   FROM competition c JOIN competition_version v ON v.id = (SELECT MAX(id) FROM competition_version WHERE competition_id = c.id)
   WHERE c.club_id = ?`;
@@ -178,6 +179,18 @@ export async function competition(db: D1Database, idOrSlug: number | string): Pr
 export async function competitionExclusions(db: D1Database, competitionId: number): Promise<Set<number>> {
   const rows = await db.prepare("SELECT race_id FROM competition_exclusion WHERE competition_id = ?").bind(competitionId).all<{ race_id: number }>();
   return new Set(rows.results.map((r) => r.race_id));
+}
+
+/** Races picked for a 'picked' competition (e.g. a distance band). */
+export async function competitionInclusions(db: D1Database, competitionId: number): Promise<Set<number>> {
+  const rows = await db.prepare("SELECT race_id FROM competition_inclusion WHERE competition_id = ?").bind(competitionId).all<{ race_id: number }>();
+  return new Set(rows.results.map((r) => r.race_id));
+}
+
+/** Does this competition use this race? (race-level kind/included are checked by the standings.) */
+export async function competitionUsesRace(db: D1Database, comp: Pick<CompetitionRow, "id" | "race_selection">, raceId: number): Promise<boolean> {
+  if (comp.race_selection === "picked") return (await competitionInclusions(db, comp.id)).has(raceId);
+  return !(await competitionExclusions(db, comp.id)).has(raceId);
 }
 
 // ---------- sync race list (admin button) ----------
@@ -305,6 +318,7 @@ export async function scoreSnapshot(
   comp: Pick<CompetitionRow, "system" | "params_json">,
   overrides: readonly Override[],
   raceParams: Record<string, unknown> | null = null,
+  raceBasketed: number | null = null,
 ) {
   const ids = await fancierIdsByName(db);
   const system = getSystem(comp.system);
@@ -323,6 +337,7 @@ export async function scoreSnapshot(
     system.parse(JSON.parse(comp.params_json)),
     overrides,
     raceParams,
+    { raceBasketed },
   );
 }
 
@@ -335,16 +350,21 @@ async function createDraft(db: D1Database, race: RaceRow, comp: CompetitionRow, 
   const overrides = await activeOverrides(db, race.id);
   const engineOverrides = overrides.map(({ scope, target, reason }) => ({ scope, target, reason }));
   const arrivals = JSON.parse(snap.arrivals_json) as StoredArrival[];
+  if (comp.race_selection === "picked" && !(await competitionUsesRace(db, comp, race.id))) {
+    return { competitionId: comp.id, calcId: null, changed: false, skipped: `Not one of the races picked for ${comp.name}.` };
+  }
   const raceParams = (await raceParamsFor(db, race.id)).get(comp.id) ?? null;
   let calc;
   try {
-    calc = await scoreSnapshot(db, arrivals, comp, engineOverrides, raceParams);
+    calc = await scoreSnapshot(db, arrivals, comp, engineOverrides, raceParams, race.basketed_total);
   } catch (e) {
     // e.g. the weighted competition has no closing time for this race yet: nothing is guessed.
     if (e instanceof MissingRaceSettings) return { competitionId: comp.id, calcId: null, changed: false, skipped: e.message };
     throw e;
   }
-  const inputsHash = await sha256(JSON.stringify({ snapshot: snap.content_sha256, system: comp.system, params: comp.params_json, raceParams, overrides: engineOverrides }));
+  const inputsHash = await sha256(
+    JSON.stringify({ snapshot: snap.content_sha256, system: comp.system, params: comp.params_json, raceParams, raceBasketed: race.basketed_total, overrides: engineOverrides }),
+  );
 
   const latest = await db
     .prepare("SELECT id, inputs_sha256 FROM race_calc WHERE race_id = ? AND competition_id = ? AND status IN ('draft','published') ORDER BY id DESC LIMIT 1")
@@ -365,7 +385,9 @@ async function createDraft(db: D1Database, race: RaceRow, comp: CompetitionRow, 
   const stmts = calc.fanciers
     .filter((f) => /^\d+$/.test(f.fancierKey))
     .map((f) =>
-      db.prepare("INSERT INTO race_calc_score (race_calc_id, fancier_id, birds_scored, score) VALUES (?, ?, ?, ?)").bind(calcId, Number(f.fancierKey), f.birdsScored, f.score),
+      db
+        .prepare("INSERT INTO race_calc_score (race_calc_id, fancier_id, birds_scored, score, points, basketed) VALUES (?, ?, ?, ?, ?, ?)")
+        .bind(calcId, Number(f.fancierKey), f.birdsScored, f.score, f.points ?? null, f.basketed ?? null),
     );
   if (stmts.length) await db.batch(stmts);
   await audit(db, now, actor, "draft-created", "race", race.id, { calcId, competition: comp.slug, n: calc.n, competitionVersion: comp.version_id, overrides: overrides.length, warnings });
@@ -558,6 +580,7 @@ export async function updateRace(ctx: Ctx, raceId: number, patch: { kind?: strin
 export interface CompetitionInput {
   name?: string;
   visibility?: "members" | "admin";
+  raceSelection?: "all" | "picked";
   params?: unknown;
   racesCounted?: "all" | "best";
   bestX?: number | null;
@@ -589,7 +612,12 @@ export async function updateCompetition(ctx: Ctx, competitionId: number, input: 
   const order = input.displayOrder ?? before.display_order;
   const visibility = input.visibility ?? before.visibility;
   if (visibility !== "members" && visibility !== "admin") throw new UserError("Visibility must be members or admin.");
-  await ctx.db.prepare("UPDATE competition SET name = ?, active = ?, display_order = ?, visibility = ? WHERE id = ?").bind(name, active, order, visibility, competitionId).run();
+  const raceSelection = input.raceSelection ?? before.race_selection;
+  if (raceSelection !== "all" && raceSelection !== "picked") throw new UserError("Race selection must be all or picked.");
+  await ctx.db
+    .prepare("UPDATE competition SET name = ?, active = ?, display_order = ?, visibility = ?, race_selection = ? WHERE id = ?")
+    .bind(name, active, order, visibility, raceSelection, competitionId)
+    .run();
   const paramsJson = JSON.stringify(params);
   const versionChanged = paramsJson !== before.params_json || racesCounted !== before.races_counted || bestX !== before.best_x;
   if (versionChanged) {
@@ -600,16 +628,26 @@ export async function updateCompetition(ctx: Ctx, competitionId: number, input: 
   }
   await audit(ctx.db, now, actor, "competition-update", "competition", competitionId, {
     before: { name: before.name, params: before.params_json, racesCounted: before.races_counted, bestX: before.best_x, active: before.active, visibility: before.visibility },
-    after: { name, params: paramsJson, racesCounted, bestX, active, visibility },
+    after: { name, params: paramsJson, racesCounted, bestX, active, visibility, raceSelection },
   });
   // Scoring changes alter race results: create fresh drafts for the admin to review and publish.
-  if (paramsJson !== before.params_json || (active && !before.active)) return recalculateSeason(ctx, season, actor, competitionId);
+  if (paramsJson !== before.params_json || (active && !before.active) || raceSelection !== before.race_selection) {
+    return recalculateSeason(ctx, season, actor, competitionId);
+  }
   return [];
 }
 
 export async function createCompetition(
   ctx: Ctx,
-  input: { name: string; system: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null; visibility?: "members" | "admin" },
+  input: {
+    name: string;
+    system: string;
+    params?: unknown;
+    racesCounted?: "all" | "best";
+    bestX?: number | null;
+    visibility?: "members" | "admin";
+    raceSelection?: "all" | "picked";
+  },
   actor: string,
   season: number,
 ) {
@@ -632,8 +670,8 @@ export async function createCompetition(
   if (taken) throw new UserError("A competition with that name already exists.");
   const maxOrder = await ctx.db.prepare("SELECT COALESCE(MAX(display_order), 0) AS m FROM competition WHERE club_id = ?").bind(CLUB_ID).first<{ m: number }>();
   const res = await ctx.db
-    .prepare("INSERT INTO competition (club_id, name, slug, system, display_order, active, created_at, visibility) VALUES (?, ?, ?, ?, ?, 1, ?, ?)")
-    .bind(CLUB_ID, name, slug, system.id, (maxOrder?.m ?? 0) + 1, iso(now), input.visibility === "admin" ? "admin" : "members")
+    .prepare("INSERT INTO competition (club_id, name, slug, system, display_order, active, created_at, visibility, race_selection) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)")
+    .bind(CLUB_ID, name, slug, system.id, (maxOrder?.m ?? 0) + 1, iso(now), input.visibility === "admin" ? "admin" : "members", input.raceSelection === "picked" ? "picked" : "all")
     .run();
   const id = res.meta.last_row_id!;
   await ctx.db
@@ -670,12 +708,22 @@ export async function setCompetitionRaceParams(ctx: Ctx, competitionId: number, 
   return hasSheet ? recalculateRace(ctx, raceId, actor, competitionId) : { drafts: [], changed: false };
 }
 
+/** Includes or leaves out a race for one competition. Picking a race scores it as a new draft. */
 export async function setCompetitionRace(ctx: Ctx, competitionId: number, raceId: number, included: boolean, actor: string) {
-  await competition(ctx.db, competitionId);
+  const comp = await competition(ctx.db, competitionId);
   await getRace(ctx.db, raceId);
-  if (included) await ctx.db.prepare("DELETE FROM competition_exclusion WHERE competition_id = ? AND race_id = ?").bind(competitionId, raceId).run();
-  else await ctx.db.prepare("INSERT OR IGNORE INTO competition_exclusion (competition_id, race_id) VALUES (?, ?)").bind(competitionId, raceId).run();
-  await audit(ctx.db, ctx.now(), actor, "competition-race", "competition", competitionId, { raceId, included });
+  const db = ctx.db;
+  if (comp.race_selection === "picked") {
+    if (included) await db.prepare("INSERT OR IGNORE INTO competition_inclusion (competition_id, race_id) VALUES (?, ?)").bind(competitionId, raceId).run();
+    else await db.prepare("DELETE FROM competition_inclusion WHERE competition_id = ? AND race_id = ?").bind(competitionId, raceId).run();
+  } else if (included) {
+    await db.prepare("DELETE FROM competition_exclusion WHERE competition_id = ? AND race_id = ?").bind(competitionId, raceId).run();
+  } else {
+    await db.prepare("INSERT OR IGNORE INTO competition_exclusion (competition_id, race_id) VALUES (?, ?)").bind(competitionId, raceId).run();
+  }
+  await audit(db, ctx.now(), actor, "competition-race", "competition", competitionId, { raceId, included });
+  if (included && (await latestSnapshot(db, raceId, "sheet"))) return recalculateRace(ctx, raceId, actor, competitionId);
+  return { drafts: [], changed: false };
 }
 
 // ---------- live (cron, every 5 minutes) ----------

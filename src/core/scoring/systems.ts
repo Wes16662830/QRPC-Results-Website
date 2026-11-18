@@ -5,7 +5,14 @@
  * points and per-fancier race scores, so storage, publishing, standings and exports work unchanged.
  */
 import { calculateRace, type ArrivalInput, type Override, type RaceCalculation } from "./fiveBird";
+import { calculateBirdPoints, calculateTopPercent, calculateWins } from "./extraSystems";
 import { calculateWeightedRace, parseClosing } from "./weighted";
+
+/** Race facts some systems need beyond the arrivals. */
+export interface RaceContext {
+  /** Birds basketed in the whole race (Benzing's race total), when known. */
+  raceBasketed: number | null;
+}
 
 export interface ParamField {
   key: string;
@@ -27,6 +34,12 @@ export class MissingRaceSettings extends Error {
 export interface ScoringSystem<P extends Record<string, unknown> = Record<string, unknown>> {
   id: string;
   name: string;
+  /** What the standings rank: fanciers, or individual birds (by ring). */
+  entity: "fancier" | "bird";
+  /** Season total: sum of race scores, or a ratio Σ counted ÷ Σ basketed (percent). */
+  season: "sum" | "ratio";
+  /** Short label for the score column, e.g. "Points", "Wins", "%". */
+  unit: string;
   /** Plain-English summary for rules pages, given the parameters. */
   describe(params: P): string;
   fields: ParamField[];
@@ -38,7 +51,13 @@ export interface ScoringSystem<P extends Record<string, unknown> = Record<string
   /** Validates per-race settings; throws RangeError with a readable message. */
   parseRace?(raw: unknown): Record<string, unknown>;
   /** Throws MissingRaceSettings when raceFields exist but raceParams is null. */
-  score(arrivals: readonly ArrivalInput[], params: P, overrides: readonly Override[], raceParams?: Record<string, unknown> | null): RaceCalculation;
+  score(
+    arrivals: readonly ArrivalInput[],
+    params: P,
+    overrides: readonly Override[],
+    raceParams?: Record<string, unknown> | null,
+    ctx?: RaceContext,
+  ): RaceCalculation;
 }
 
 function intField(raw: Record<string, unknown>, f: ParamField): number {
@@ -53,6 +72,9 @@ const topNFields: ParamField[] = [{ key: "scoringBirds", label: "Scoring birds p
 export const topNPerFancier: ScoringSystem<{ scoringBirds: number }> = {
   id: "top-n-per-fancier",
   name: "First N birds per fancier",
+  entity: "fancier",
+  season: "sum",
+  unit: "Points",
   fields: topNFields,
   defaults: { scoringBirds: 5 },
   describe: (p) =>
@@ -68,6 +90,9 @@ export const topNPerFancier: ScoringSystem<{ scoringBirds: number }> = {
 export const weightedByBasketing: ScoringSystem<Record<string, never>> = {
   id: "weighted-by-basketing",
   name: "Weighted by birds basketed (closing time)",
+  entity: "fancier",
+  season: "sum",
+  unit: "Points",
   fields: [],
   defaults: {},
   raceFields: [
@@ -87,9 +112,64 @@ export const weightedByBasketing: ScoringSystem<Record<string, never>> = {
   },
 };
 
+/** Best bird: every bird home scores 100 (1st) down to 1 (last); points add up per bird over the season. */
+export const birdPoints: ScoringSystem<Record<string, never>> = {
+  id: "bird-points",
+  name: "Best bird (100 to 1 per race)",
+  entity: "bird",
+  season: "sum",
+  unit: "Points",
+  fields: [],
+  defaults: {},
+  describe: () =>
+    "Every bird home scores: the first bird gets 100 points, the last gets 1, and the rest are spaced evenly in between. Points add up per bird over the season.",
+  parse: () => ({}),
+  score: (arrivals, _p, overrides) => calculateBirdPoints(arrivals, overrides),
+};
+
+/** Wins: the fancier with the first bird in the full result gets one win. */
+export const wins: ScoringSystem<Record<string, never>> = {
+  id: "wins",
+  name: "Race wins (first bird)",
+  entity: "fancier",
+  season: "sum",
+  unit: "Wins",
+  fields: [],
+  defaults: {},
+  describe: () => "The fancier who clocks the first bird in the full result wins the race. Wins add up over the season.",
+  parse: () => ({}),
+  score: (arrivals, _p, overrides) => calculateWins(arrivals, overrides),
+};
+
+const percentField: ParamField = { key: "percent", label: "Top % of birds basketed", type: "integer", min: 1, max: 100 };
+
+/** Share of a fancier's basketed birds that finish in the top X % of all birds basketed. */
+export const topPercent: ScoringSystem<{ percent: number }> = {
+  id: "top-percent",
+  name: "Birds in the top X % (of basketed)",
+  entity: "fancier",
+  season: "ratio",
+  unit: "%",
+  fields: [percentField],
+  defaults: { percent: 25 },
+  describe: (p) =>
+    `The fastest ${p.percent}% of all birds basketed in a race (rounded down) are counted. A fancier's figure is the share of the birds he basketed that made it: his counted birds ÷ birds basketed. The season figure uses all his birds over the season, not an average of races.`,
+  parse(raw) {
+    if (typeof raw !== "object" || raw === null) throw new RangeError("Parameters missing.");
+    return { percent: intField(raw as Record<string, unknown>, percentField) };
+  },
+  score(arrivals, p, overrides, _rp, ctx) {
+    const fallback = [...new Map(arrivals.map((a) => [a.fancierKey, a.basketed ?? 0])).values()].reduce((s, n) => s + n, 0);
+    return calculateTopPercent(arrivals, p.percent, ctx?.raceBasketed ?? fallback, overrides);
+  },
+};
+
 export const SYSTEMS: Record<string, ScoringSystem> = {
   [topNPerFancier.id]: topNPerFancier as unknown as ScoringSystem,
   [weightedByBasketing.id]: weightedByBasketing as unknown as ScoringSystem,
+  [birdPoints.id]: birdPoints as unknown as ScoringSystem,
+  [wins.id]: wins as unknown as ScoringSystem,
+  [topPercent.id]: topPercent as unknown as ScoringSystem,
 };
 
 export function getSystem(id: string): ScoringSystem {

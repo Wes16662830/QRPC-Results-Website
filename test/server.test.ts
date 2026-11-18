@@ -89,7 +89,8 @@ describe("calculate → draft → publish (Mooi River acceptance, end to end)", 
     expect((await db.prepare("SELECT live_mode FROM race WHERE id = ?").bind(raceId).first<{ live_mode: string }>())!.live_mode).toBe("off");
     // Audit trail.
     const actions = (await db.prepare("SELECT action FROM audit_log ORDER BY id").all<{ action: string }>()).results.map((a) => a.action);
-    expect(actions).toEqual(["sync-races", "calculate-results", "draft-created", "publish"]);
+    // Drafts for 5-bird, best bird, wins and top 25 %; distance bands (no races picked) and weighted (no closing time) are skipped.
+    expect(actions).toEqual(["sync-races", "calculate-results", "draft-created", "draft-created", "draft-created", "draft-created", "publish"]);
   });
 
   it("does not create a new draft when nothing changed, and does not store a duplicate snapshot", async () => {
@@ -185,7 +186,9 @@ describe("competitions (multiple result systems)", () => {
     await expect(createCompetition(ctx, { name: "X", system: "nope" }, ADMIN, 2026)).rejects.toThrow(/Unknown scoring system/);
 
     const view = await adminRaceDetail(db, raceId, NOW);
-    expect(view.results.map((r) => r.competition.slug)).toEqual(["five-bird", "weighted", "3-bird"]);
+    expect(view.results.map((r) => r.competition.slug)).toEqual([
+      "five-bird", "best-bird", "best-short-bird", "best-middle-bird", "best-long-bird", "wins", "top-25", "weighted", "3-bird",
+    ]);
     const three = draftOf(view, "3-bird")!;
     expect(three.n).toBe(20); // 6 fanciers × 3 + Albert's 2
     expect(three.fanciers.every((f) => f.birdsScored <= 3)).toBe(true);
@@ -206,7 +209,7 @@ describe("competitions (multiple result systems)", () => {
 
     // Deactivated competitions disappear for members.
     await updateCompetition(ctx, comp3, { active: false }, ADMIN, 2026);
-    expect((await raceDetail(db, raceId, NOW)).results.map((r) => r.competition.slug)).toEqual(["five-bird"]);
+    expect((await raceDetail(db, raceId, NOW)).results.map((r) => r.competition.slug)).toEqual(["five-bird", "best-bird", "wins", "top-25"]);
   });
 
   it("weighted competition: admin-only, skipped until a closing time is set, then scored per race", async () => {
@@ -232,7 +235,7 @@ describe("competitions (multiple result systems)", () => {
     await publish(ctx, raceId, ADMIN, false);
     // Members never see it…
     const member = await raceDetail(db, raceId, NOW);
-    expect(member.results.map((r) => r.competition.slug)).toEqual(["five-bird"]);
+    expect(member.results.map((r) => r.competition.slug)).toEqual(["five-bird", "best-bird", "wins", "top-25"]);
     await expect(championship(db, "weighted", 2026)).rejects.toThrow(/not found/);
     // …admins do.
     const champ = await championship(db, "weighted", 2026, { admin: true });
@@ -240,8 +243,47 @@ describe("competitions (multiple result systems)", () => {
 
     // Showing it to members is one switch.
     await updateCompetition(ctx, wId, { visibility: "members" }, ADMIN, 2026);
-    expect((await raceDetail(db, raceId, NOW)).results.map((r) => r.competition.slug)).toEqual(["five-bird", "weighted"]);
+    expect((await raceDetail(db, raceId, NOW)).results.map((r) => r.competition.slug)).toEqual(["five-bird", "best-bird", "wins", "top-25", "weighted"]);
     await expect(updateCompetition(ctx, wId, { visibility: "x" as never }, ADMIN, 2026)).rejects.toThrow(/Visibility/);
+  });
+
+  it("best bird, distance bands, wins and top 25 %: standings by bird, by count and by season ratio", async () => {
+    const { db, ctx } = setup();
+    const raceId = await mooiRiverId(ctx);
+    await calculateResults(ctx, raceId, ADMIN);
+    await publish(ctx, raceId, ADMIN, false);
+
+    const best = await championship(db, "best-bird", 2026);
+    expect(best.competition).toMatchObject({ entity: "bird", unit: "Points" });
+    expect(best.standings[0]).toMatchObject({ rank: 1, ring: "ZA-2025-BORD-3404", fancierName: "Wesley Phillips", total: 100, racesScored: 1 });
+    expect(best.standings).toHaveLength(265);
+
+    const w = await championship(db, "wins", 2026);
+    expect(w.standings[0]).toMatchObject({ fancierName: "Wesley Phillips", total: 1 });
+    expect(w.standings.filter((x) => x.total === 0)).toHaveLength(6);
+
+    const top = await championship(db, "top-25", 2026);
+    expect(top.competition.seasonMode).toBe("ratio");
+    expect(top.standings[0]).toMatchObject({ fancierName: "Scott King", total: 36.14, points: 30, basketed: 83 });
+
+    // Distance bands only use races the admin picks.
+    const short = await championship(db, "best-short-bird", 2026);
+    expect(short.standings).toEqual([]);
+    expect((await raceDetail(db, raceId, NOW)).results.map((r) => r.competition.slug)).not.toContain("best-short-bird");
+    const shortId = short.competition.id;
+    const picked = await setCompetitionRace(ctx, shortId, raceId, true, ADMIN);
+    expect(picked.changed).toBe(true);
+    await publish(ctx, raceId, ADMIN, false);
+    expect((await championship(db, "best-short-bird", 2026)).standings[0]).toMatchObject({ ring: "ZA-2025-BORD-3404", total: 100 });
+    expect((await raceDetail(db, raceId, NOW)).results.map((r) => r.competition.slug)).toContain("best-short-bird");
+    await setCompetitionRace(ctx, shortId, raceId, false, ADMIN);
+    expect((await championship(db, "best-short-bird", 2026)).standings).toEqual([]);
+
+    // Bird and ratio settings are editable like any other competition.
+    await updateCompetition(ctx, top.competition.id, { params: { percent: 50 } }, ADMIN, 2026);
+    await publish(ctx, raceId, ADMIN, false);
+    expect((await championship(db, "top-25", 2026)).standings[0]!.total).toBeGreaterThan(36.14);
+    await expect(updateCompetition(ctx, top.competition.id, { raceSelection: "x" as never }, ADMIN, 2026)).rejects.toThrow(/Race selection/);
   });
 
   it("changing scoring birds creates fresh drafts; recalc without changes does nothing", async () => {
@@ -416,6 +458,17 @@ describe("HTTP API", () => {
     expect(wa.text).toContain("*5-bird championship* (32 scoring birds)");
     const champCsv = await (await call("/api/championship/export.csv?season=2026", { cookie })).text();
     expect(champCsv).toContain("1,Glenn Mcewan,122,122");
+    const birdCsv = await (await call("/api/championship/export.csv?season=2026&competition=best-bird", { cookie })).text();
+    expect(birdCsv.split("\r\n")[0]).toBe("Place,Ring,Fancier,MooiRiver,Total (Points)");
+    expect(birdCsv).toContain("1,ZA-2025-BORD-3404,Wesley Phillips,100,100");
+    const birdWa = (await (await call("/api/championship/whatsapp?season=2026&competition=best-bird", { cookie })).json()) as { text: string };
+    expect(birdWa.text).toContain("1. ZA-2025-BORD-3404 (Wesley Phillips) – 100 pts");
+    const topWa = (await (await call("/api/championship/whatsapp?season=2026&competition=top-25", { cookie })).json()) as { text: string };
+    expect(topWa.text).toContain("1. Scott King – 36.14%");
+    const raceBirdWa = (await (await call(`/api/races/${mooi.id}/whatsapp?competition=best-bird`, { cookie })).json()) as { text: string };
+    expect(raceBirdWa.text).toContain("1. ZA-2025-BORD-3404 (Wesley Phillips) – 100 pts");
+    const winsWa = (await (await call(`/api/races/${mooi.id}/whatsapp?competition=wins`, { cookie })).json()) as { text: string };
+    expect(winsWa.text).toContain("1. Wesley Phillips – 1 win");
 
     const glennId = (await db.prepare("SELECT id FROM fancier WHERE name = 'Glenn Mcewan'").first<{ id: number }>())!.id;
     const fancier = (await (await call(`/api/fanciers/${glennId}?season=2026`, { cookie })).json()) as {
