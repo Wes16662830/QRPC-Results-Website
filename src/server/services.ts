@@ -5,7 +5,7 @@
 import { pickFullResult, type BenzingRace } from "../core/benzing/parseRaceList";
 import type { LiveArrival } from "../core/benzing/parseLiveArrivals";
 import type { Override, RaceCalculation } from "../core/scoring/fiveBird";
-import { getSystem, MissingRaceSettings } from "../core/scoring/systems";
+import { getSystem, MissingRaceSettings, usesBaseRace } from "../core/scoring/systems";
 import { BenzingClient, BenzingError, type ClubRef } from "./benzingClient";
 import { CLUB_ID, type D1Database } from "./env";
 
@@ -188,13 +188,14 @@ export async function competitionInclusions(db: D1Database, competitionId: numbe
 }
 
 /**
- * Birds home in a competition's base race: the first race (by date) this season that the competition
- * uses and that has a stored result sheet. Null when no such race has results yet.
+ * Size of a competition's base race: its first race (by date) this season that it uses and that has a stored
+ * result sheet. For best bird that is the birds home; for 5-bird with a first-race scale it is the number of
+ * scoring birds the competition's own rule gives that race (disqualifications applied). Null without results.
  */
-export async function baseBirdsFor(db: D1Database, comp: Pick<CompetitionRow, "id" | "race_selection">, season: number): Promise<number | null> {
+export async function baseBirdsFor(db: D1Database, comp: Pick<CompetitionRow, "id" | "race_selection" | "system" | "params_json">, season: number): Promise<number | null> {
   const row = await db
     .prepare(
-      `SELECT s.arrival_count FROM race r
+      `SELECT r.id AS race_id, r.basketed_total, s.arrival_count, s.arrivals_json FROM race r
        JOIN snapshot s ON s.id = (SELECT MAX(id) FROM snapshot WHERE race_id = r.id AND source = 'sheet')
        WHERE r.club_id = ? AND r.season = ? AND r.kind = 'race' AND r.included = 1
          AND CASE WHEN ? = 'picked'
@@ -203,8 +204,13 @@ export async function baseBirdsFor(db: D1Database, comp: Pick<CompetitionRow, "i
        ORDER BY r.race_date, r.race_number LIMIT 1`,
     )
     .bind(CLUB_ID, season, comp.race_selection, comp.id, comp.id)
-    .first<{ arrival_count: number }>();
-  return row?.arrival_count ?? null;
+    .first<{ race_id: number; basketed_total: number | null; arrival_count: number; arrivals_json: string }>();
+  if (!row) return null;
+  if (getSystem(comp.system).baseSize !== "scoringBirds") return row.arrival_count;
+  const overrides = (await activeOverrides(db, row.race_id)).map(({ scope, target, reason }) => ({ scope, target, reason }));
+  // Score the base race on its own scale (no base) to get its number of scoring birds.
+  const calc = scoreArrivals(await fancierIdsByName(db), JSON.parse(row.arrivals_json) as StoredArrival[], comp, overrides, null, row.basketed_total, null);
+  return calc.n || null;
 }
 
 /** Does this competition use this race? (race-level kind/included are checked by the standings.) */
@@ -412,7 +418,8 @@ async function createDrafts(db: D1Database, race: RaceRow, actor: string, now: D
     }
     const rp = raceParams.get(comp.id) ?? null;
     // Base-race systems (best bird): the competition's first race this season sets the points scale.
-    const baseBirds = getSystem(comp.system).usesBaseRace ? await baseBirdsFor(db, comp, race.season) : null;
+    const system = getSystem(comp.system);
+    const baseBirds = usesBaseRace(system, system.parse(JSON.parse(comp.params_json))) ? await baseBirdsFor(db, comp, race.season) : null;
     let calc;
     try {
       calc = scoreArrivals(ids, arrivals, comp, engineOverrides, rp, race.basketed_total, baseBirds);

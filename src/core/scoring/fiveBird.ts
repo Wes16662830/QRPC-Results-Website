@@ -39,6 +39,12 @@ export interface Override {
 
 export interface RaceSettings {
   scoringBirds: number;
+  /**
+   * Fixed scale (agreed 18 Nov 2026 for the 5-bird championship): N from the season's first race. Scoring
+   * position p then earns baseN − p + 1 in every race; scoring birds placed beyond baseN earn 0. Omit for
+   * the original rule (N = scoring birds in this race).
+   */
+  baseN?: number;
 }
 
 export interface ScoringLine {
@@ -78,6 +84,9 @@ export function calculateRace(
   if (!Number.isInteger(settings.scoringBirds) || settings.scoringBirds < 1) {
     throw new RangeError("scoringBirds must be a positive integer");
   }
+  if (settings.baseN !== undefined && (!Number.isInteger(settings.baseN) || settings.baseN < 1)) {
+    throw new RangeError("baseN must be a positive integer");
+  }
   const ids = new Set<string>();
   for (const a of arrivals) {
     if (!Number.isInteger(a.speedMilli) || a.speedMilli < 0) {
@@ -111,15 +120,17 @@ export function calculateRace(
     return true;
   });
 
-  const n = scoring.length;
-  const lines: ScoringLine[] = scoring.map((a, i) => ({
+  const top = settings.baseN === undefined ? scoring.length : settings.baseN;
+  const counted = scoring.slice(0, top);
+  const n = counted.length;
+  const lines: ScoringLine[] = counted.map((a, i) => ({
     arrivalId: a.id,
     fancierKey: a.fancierKey,
     ring: a.ring,
     speedMilli: a.speedMilli,
     benzingPosition: a.benzingPosition,
     scoringPosition: i + 1,
-    points: n - i,
+    points: top - i,
   }));
 
   const byFancier = new Map<string, FancierRaceScore & { firstPos: number }>();

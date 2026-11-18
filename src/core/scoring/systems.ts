@@ -12,17 +12,19 @@ import { calculateWeightedRace, parseClosing } from "./weighted";
 export interface RaceContext {
   /** Birds basketed in the whole race (Benzing's race total), when known. */
   raceBasketed: number | null;
-  /** Birds home in the competition's base race (its first race this season), for base-race systems. */
+  /** Size of the competition's base race (its first race this season), for base-race systems. */
   baseBirds?: number | null;
 }
 
 export interface ParamField {
   key: string;
   label: string;
-  type: "integer" | "time";
+  type: "integer" | "time" | "select";
   min?: number;
   max?: number;
   help?: string;
+  /** For type "select". */
+  options?: { value: string; label: string }[];
 }
 
 /** Thrown when a race needs per-race settings (e.g. a closing time) that the admin has not set yet. */
@@ -43,7 +45,12 @@ export interface ScoringSystem<P extends Record<string, unknown> = Record<string
   /** Short label for the score column, e.g. "Points", "Wins", "%". */
   unit: string;
   /** True if scores depend on the competition's first race this season (RaceContext.baseBirds). */
-  usesBaseRace?: boolean;
+  usesBaseRace?: boolean | ((params: P) => boolean);
+  /**
+   * What the base race contributes: its birds home (best bird), or the number of scoring birds this
+   * competition's own rule gives it (5-bird with a first-race scale).
+   */
+  baseSize?: "birdsHome" | "scoringBirds";
   /** Plain-English summary for rules pages, given the parameters. */
   describe(params: P): string;
   fields: ParamField[];
@@ -72,24 +79,44 @@ function intField(raw: Record<string, unknown>, f: ParamField): number {
   return v;
 }
 
-const topNFields: ParamField[] = [{ key: "scoringBirds", label: "Scoring birds per fancier", type: "integer", min: 1, max: 50 }];
+const topNFields: ParamField[] = [
+  { key: "scoringBirds", label: "Scoring birds per fancier", type: "integer", min: 1, max: 50 },
+  {
+    key: "scale",
+    label: "Points scale",
+    type: "select",
+    options: [
+      { value: "race", label: "Each race: N = scoring birds in that race" },
+      { value: "first-race", label: "First race of the season sets N for every race" },
+    ],
+    help: "With the first-race scale a win is worth the same in every race.",
+  },
+];
 
 /** QRPC 5-bird system, generalised: each fancier's first N birds score N_total − position + 1. */
-export const topNPerFancier: ScoringSystem<{ scoringBirds: number }> = {
+export const topNPerFancier: ScoringSystem<{ scoringBirds: number; scale: "race" | "first-race" }> = {
   id: "top-n-per-fancier",
   name: "First N birds per fancier",
   entity: "fancier",
   season: "sum",
   unit: "Points",
+  usesBaseRace: (p) => p.scale === "first-race",
+  baseSize: "scoringBirds",
   fields: topNFields,
-  defaults: { scoringBirds: 5 },
+  defaults: { scoringBirds: 5, scale: "race" },
   describe: (p) =>
-    `Each fancier's first ${p.scoringBirds} birds home score. Those birds are re-ranked by speed; with N scoring birds the fastest gets N points and the slowest 1.`,
+    p.scale === "first-race"
+      ? `Each fancier's first ${p.scoringBirds} birds home score. The season's first race sets the points: if it had N scoring birds, the fastest scoring bird in every race gets N points, the next N − 1, and so on (scoring birds placed beyond N get 0). A win is worth the same in every race.`
+      : `Each fancier's first ${p.scoringBirds} birds home score. Those birds are re-ranked by speed; with N scoring birds the fastest gets N points and the slowest 1.`,
   parse(raw) {
     if (typeof raw !== "object" || raw === null) throw new RangeError("Parameters missing.");
-    return { scoringBirds: intField(raw as Record<string, unknown>, topNFields[0]!) };
+    const r = raw as Record<string, unknown>;
+    const scale = r.scale === undefined || r.scale === "" ? "race" : r.scale;
+    if (scale !== "race" && scale !== "first-race") throw new RangeError("Points scale must be each race or first race.");
+    return { scoringBirds: intField(r, topNFields[0]!), scale };
   },
-  score: (arrivals, p, overrides) => calculateRace(arrivals, { scoringBirds: p.scoringBirds }, overrides),
+  score: (arrivals, p, overrides, _rp, ctx) =>
+    calculateRace(arrivals, { scoringBirds: p.scoringBirds, ...(p.scale === "first-race" && ctx?.baseBirds ? { baseN: ctx.baseBirds } : {}) }, overrides),
 };
 
 /** Weighted by basketing: birds within the closing time score N − position + 1; total ÷ birds basketed. */
@@ -159,6 +186,7 @@ export const baseBirdPoints: ScoringSystem<Record<string, never>> = {
   season: "sum",
   unit: "Points",
   usesBaseRace: true,
+  baseSize: "birdsHome",
   fields: [],
   defaults: {},
   describe: () =>
@@ -213,6 +241,11 @@ export const SYSTEMS: Record<string, ScoringSystem> = {
   [wins.id]: wins as unknown as ScoringSystem,
   [topPercent.id]: topPercent as unknown as ScoringSystem,
 };
+
+/** Does this competition's scoring depend on its first race of the season? */
+export function usesBaseRace(system: ScoringSystem, params: Record<string, unknown>): boolean {
+  return typeof system.usesBaseRace === "function" ? system.usesBaseRace(params) : Boolean(system.usesBaseRace);
+}
 
 export function getSystem(id: string): ScoringSystem {
   const s = SYSTEMS[id];

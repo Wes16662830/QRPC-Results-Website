@@ -56,6 +56,17 @@ describe("calculateRace", () => {
     expect(r.excluded).toHaveLength(2);
   });
 
+  it("first-race scale: points = baseN − position + 1; scoring birds beyond baseN get 0", () => {
+    const arrivals = [bird("A", 50), bird("B", 40), bird("C", 30)];
+    const big = calculateRace(arrivals, { scoringBirds: 5, baseN: 10 });
+    expect(big.lines.map((l) => l.points)).toEqual([10, 9, 8]); // smaller race: last gets more than 1
+    const small = calculateRace(arrivals, { scoringBirds: 5, baseN: 2 });
+    expect(small.lines.map((l) => [l.fancierKey, l.points])).toEqual([["A", 2], ["B", 1]]); // C beyond N: 0
+    expect(small.n).toBe(2);
+    expect(small.fanciers.map((f) => f.fancierKey)).toEqual(["A", "B"]);
+    expect(() => calculateRace(arrivals, { scoringBirds: 5, baseN: 0 })).toThrow(/baseN/);
+  });
+
   it("handles an empty race", () => {
     expect(calculateRace([], { scoringBirds: 5 })).toEqual({ n: 0, lines: [], fanciers: [], excluded: [] });
   });

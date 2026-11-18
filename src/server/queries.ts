@@ -1,7 +1,7 @@
 /** Read models for the site. Members only ever see PUBLISHED 5-bird results. */
 import { calculateSeason } from "../core/scoring/fiveBird";
 import { ratioSeason } from "../core/scoring/extraSystems";
-import { getSystem, MissingRaceSettings } from "../core/scoring/systems";
+import { getSystem, MissingRaceSettings, usesBaseRace } from "../core/scoring/systems";
 import { CLUB_ID, type D1Database } from "./env";
 import {
   baseBirdsFor, competition as loadCompetition, competitionExclusions, competitionInclusions, competitionUsesRace, competitions, getRace, isLiveActive, raceParamsFor, sastDate, scoreSnapshot, UserError,
@@ -11,7 +11,8 @@ import {
 /** Public description of a competition. */
 export function competitionInfo(c: CompetitionRow) {
   const system = getSystem(c.system);
-  const params = JSON.parse(c.params_json) as Record<string, unknown>;
+  // Normalised through the system so new options (e.g. the 5-bird points scale) show their default.
+  const params = system.parse(JSON.parse(c.params_json)) as Record<string, unknown>;
   return {
     id: c.id,
     name: c.name,
@@ -434,7 +435,8 @@ export async function live(db: D1Database, now: Date) {
     const provisional = [];
     for (const comp of comps) {
       try {
-        const baseBirds = getSystem(comp.system).usesBaseRace ? await baseBirdsFor(db, comp, race.season) : null;
+        const system = getSystem(comp.system);
+        const baseBirds = usesBaseRace(system, system.parse(JSON.parse(comp.params_json))) ? await baseBirdsFor(db, comp, race.season) : null;
         const calc = await scoreSnapshot(db, arrivals, comp, [], raceParams.get(comp.id) ?? null, race.basketed_total, baseBirds);
         provisional.push({ competition: competitionInfo(comp), result: decorateCalc({ ...calc, warnings: [] }, names, arrivals) });
       } catch (e) {

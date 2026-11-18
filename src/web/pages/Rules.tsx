@@ -2,19 +2,27 @@ import { useApi } from "../hooks";
 import type { CompetitionInfo } from "../types";
 import { Card, PageTitle, TableWrap } from "../ui";
 
+/** Glenn Mcewan at Mooi River 2026: places in the full result and among the 32 scoring birds. */
 const GLENN = [
-  { full: 5, scoring: 5, points: 28 },
-  { full: 8, scoring: 8, points: 25 },
-  { full: 9, scoring: 9, points: 24 },
-  { full: 10, scoring: 10, points: 23 },
-  { full: 11, scoring: 11, points: 22 },
+  { full: 5, scoring: 5 },
+  { full: 8, scoring: 8 },
+  { full: 9, scoring: 9 },
+  { full: 10, scoring: 10 },
+  { full: 11, scoring: 11 },
 ];
+/** In 2026 the first race (Matatiele 1) had 36 scoring birds; Mooi River itself had 32. */
+const BASE_2026 = 36;
+const MOOI_N = 32;
 
 export function RulesPage() {
   const { data: comps } = useApi<CompetitionInfo[]>("/api/competitions");
   const five = comps?.find((c) => c.system === "top-n-per-fancier") ?? null;
   const data = five;
   const x = Number(five?.params.scoringBirds ?? 5);
+  const firstRace = five?.params.scale === "first-race";
+  const scaleN = firstRace ? BASE_2026 : MOOI_N;
+  const glenn = GLENN.map((g) => ({ ...g, points: scaleN - g.scoring + 1 }));
+  const glennTotal = glenn.reduce((sum, g) => sum + g.points, 0);
   return (
     <>
       <PageTitle title="Rules" sub="How the club's results and championships are worked out" />
@@ -35,7 +43,15 @@ export function RulesPage() {
           <ol className="list-decimal space-y-2 pl-5 text-sm leading-relaxed">
             <li>We start from Benzing's <strong>full result</strong>: every bird that came home, fastest (highest m/min) first. Benzing's own points and championships are not used.</li>
             <li>For each fancier we keep only their <strong>first {x} birds home</strong>, however late they arrive. Every other bird is removed.</li>
-            <li>The remaining <em>scoring birds</em> are ranked again by speed. If there are N scoring birds, the fastest gets <strong>N points</strong>, the next N − 1, down to <strong>1 point</strong> for the slowest.</li>
+            {firstRace ? (
+              <li>
+                The remaining <em>scoring birds</em> are ranked again by speed. <strong>The season's first race sets the points:</strong> if it had N scoring birds, the
+                fastest scoring bird in <em>every</em> race gets <strong>N points</strong>, the next N − 1, and so on. A win is worth the same in every race; in a smaller
+                race the last scoring bird simply gets more than 1, and in a bigger race scoring birds placed beyond N get 0.
+              </li>
+            ) : (
+              <li>The remaining <em>scoring birds</em> are ranked again by speed. If there are N scoring birds, the fastest gets <strong>N points</strong>, the next N − 1, down to <strong>1 point</strong> for the slowest.</li>
+            )}
             <li>A fancier's race score is the total of their scoring birds' points.</li>
             <li><strong>Equal speeds:</strong> no two birds share a place. Birds with exactly the same speed keep the order Benzing lists them in.</li>
             <li><strong>Disqualified birds</strong> are removed before scoring, so that fancier's next bird home moves up into their {x}.</li>
@@ -49,7 +65,15 @@ export function RulesPage() {
         </Card>
         <Card title="Worked example: Mooi River, 4 July 2026">
           <p className="mb-3 text-sm leading-relaxed">
-            372 birds basketed, 265 home, 7 fanciers. Keeping each fancier's first 5 birds leaves <strong>32 scoring birds</strong>, so the fastest scores 32 points and the slowest 1.
+            372 birds basketed, 265 home, 7 fanciers. Keeping each fancier's first 5 birds leaves <strong>32 scoring birds</strong>.{" "}
+            {firstRace ? (
+              <>
+                The 2026 scale comes from the first race, Matatiele 1, which had <strong>36 scoring birds</strong>: so the fastest scoring bird scores 36, the next 35,
+                and Mooi River's 32nd (last) scoring bird scores 5.
+              </>
+            ) : (
+              <>So the fastest scores 32 points and the slowest 1.</>
+            )}
             Glenn Mcewan's first five birds were 5th, 8th, 9th, 10th and 11th in the full result. The birds ahead of them all belonged to fanciers who still had birds to count, so these are also his places among the scoring birds:
           </p>
           <TableWrap>
@@ -58,11 +82,11 @@ export function RulesPage() {
                 <tr>
                   <th className="num">Place in full result</th>
                   <th className="num">Place among scoring birds</th>
-                  <th className="num">Points (32 − place + 1)</th>
+                  <th className="num">Points ({scaleN} − place + 1)</th>
                 </tr>
               </thead>
               <tbody>
-                {GLENN.map((g) => (
+                {glenn.map((g) => (
                   <tr key={g.full}>
                     <td className="num">{g.full}</td>
                     <td className="num">{g.scoring}</td>
@@ -73,13 +97,13 @@ export function RulesPage() {
                   <td colSpan={2} className="text-right font-semibold">
                     Race score
                   </td>
-                  <td className="num text-base font-bold">122</td>
+                  <td className="num text-base font-bold">{glennTotal}</td>
                 </tr>
               </tbody>
             </table>
           </TableWrap>
           <p className="mt-3 text-sm text-muted">
-            Further down it changes: Wesley Phillips' 3rd bird was 15th in the full result, but only 13th among scoring birds. The birds at 12 and 13 were Glenn's 6th and 7th, which don't count. So it scored 20 points.
+            Further down it changes: Wesley Phillips' 3rd bird was 15th in the full result, but only 13th among scoring birds. The birds at 12 and 13 were Glenn's 6th and 7th, which don't count. So it scored {scaleN - 13 + 1} points.
           </p>
         </Card>
         <p className="no-print pt-2 text-center text-xs text-muted">

@@ -309,6 +309,31 @@ describe("competitions (multiple result systems)", () => {
     expect(mr[0]!.points).toBe(m1Lines[0]!.points);
   });
 
+  it("5-bird: the first race's scoring birds set N for every race", async () => {
+    const m1 = readFileSync(new URL("../fixtures/benzing/r-6429-t-17076-matatiele-1.html", import.meta.url), "utf8");
+    const { db, ctx } = setup({ "/za/en/results/view/r-6429-t-17076-matatiele-1/": m1 });
+    const mooi = await mooiRiverId(ctx);
+    const mat1 = (await db.prepare("SELECT id FROM race WHERE benzing_race_id = 6429").first<{ id: number }>())!.id;
+    const fiveOf = async (raceId: number) => draftOf(await adminRaceDetail(db, raceId, NOW))!;
+
+    // Mooi River alone is its own base: the agreed 122 for Glenn.
+    await calculateResults(ctx, mooi, ADMIN);
+    expect((await fiveOf(mooi)).fanciers[0]).toMatchObject({ fancierName: "Glenn Mcewan", score: 122 });
+
+    // Matatiele 1 (earlier) has 36 scoring birds (8 fanciers; one had a single bird home): it becomes the base.
+    await calculateResults(ctx, mat1, ADMIN);
+    const base = await fiveOf(mat1);
+    expect(base.n).toBe(36);
+    expect([base.lines[0]!.points, base.lines.at(-1)!.points]).toEqual([36, 1]);
+
+    await recalculateRace(ctx, mooi, ADMIN);
+    const mr = await fiveOf(mooi);
+    expect(mr.n).toBe(32);
+    expect([mr.lines[0]!.points, mr.lines.at(-1)!.points]).toEqual([36, 5]); // a win is worth the same; last scores 5
+    // Glenn: scoring places 5, 8, 9, 10, 11 → 32 + 29 + 28 + 27 + 26 = 142.
+    expect(mr.fanciers.find((f) => f.fancierName === "Glenn Mcewan")).toMatchObject({ score: 142, benzingPositions: [5, 8, 9, 10, 11] });
+  });
+
   it("best bird, distance bands, wins and top 25 %: standings by bird, by count and by season ratio", async () => {
     const { db, ctx } = setup();
     const raceId = await mooiRiverId(ctx);

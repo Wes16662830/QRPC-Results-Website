@@ -629,7 +629,7 @@ interface AdminCompetition extends CompetitionInfo {
 interface SystemInfo {
   id: string;
   name: string;
-  fields: { key: string; label: string; type: "integer" | "time"; min?: number; max?: number; help?: string }[];
+  fields: { key: string; label: string; type: "integer" | "time" | "select"; min?: number; max?: number; help?: string; options?: { value: string; label: string }[] }[];
   raceFields?: { key: string; label: string }[];
   defaults: Record<string, unknown>;
 }
@@ -639,6 +639,21 @@ type FieldDef = SystemInfo["fields"][number] & { help?: string };
 /** One competition parameter: whole number or time, blank allowed (e.g. an optional default closing). */
 function ParamInput({ f, params, setParams }: { f: FieldDef; params: Record<string, unknown>; setParams: (p: Record<string, unknown>) => void }) {
   const v = params[f.key];
+  if (f.type === "select") {
+    return (
+      <label className="block sm:col-span-2">
+        {f.label}
+        <select className="input mt-1" value={String(v ?? f.options?.[0]?.value ?? "")} onChange={(e) => setParams({ ...params, [f.key]: e.target.value })}>
+          {(f.options ?? []).map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+        {f.help && <span className="mt-0.5 block text-xs text-muted">{f.help}</span>}
+      </label>
+    );
+  }
   return (
     <label className="block">
       {f.label}
