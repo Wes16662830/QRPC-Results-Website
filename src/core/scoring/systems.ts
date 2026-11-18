@@ -25,6 +25,8 @@ export interface ParamField {
   help?: string;
   /** For type "select". */
   options?: { value: string; label: string }[];
+  /** Only shown (and used) when another field has this value, e.g. maxPoints when scale = fixed. */
+  showWhen?: { key: string; value: string };
 }
 
 /** Thrown when a race needs per-race settings (e.g. a closing time) that the admin has not set yet. */
@@ -88,13 +90,25 @@ const topNFields: ParamField[] = [
     options: [
       { value: "race", label: "Each race: N = scoring birds in that race" },
       { value: "first-race", label: "First race of the season sets N for every race" },
+      { value: "fixed", label: "Fixed: the first bird gets the points set below" },
     ],
-    help: "With the first-race scale a win is worth the same in every race.",
+    help: "With the first-race or fixed scale a win is worth the same in every race.",
+  },
+  {
+    key: "maxPoints",
+    label: "Points for the first bird (fixed scale)",
+    type: "integer",
+    min: 1,
+    max: 1000,
+    help: "The first scoring bird gets this, each next bird 1 less; birds past it get 0.",
+    showWhen: { key: "scale", value: "fixed" },
   },
 ];
 
 /** QRPC 5-bird system, generalised: each fancier's first N birds score N_total − position + 1. */
-export const topNPerFancier: ScoringSystem<{ scoringBirds: number; scale: "race" | "first-race" }> = {
+type TopNParams = { scoringBirds: number; scale: "race" | "first-race" | "fixed"; maxPoints?: number };
+
+export const topNPerFancier: ScoringSystem<TopNParams> = {
   id: "top-n-per-fancier",
   name: "First N birds per fancier",
   entity: "fancier",
@@ -105,18 +119,25 @@ export const topNPerFancier: ScoringSystem<{ scoringBirds: number; scale: "race"
   fields: topNFields,
   defaults: { scoringBirds: 5, scale: "race" },
   describe: (p) =>
-    p.scale === "first-race"
-      ? `Each fancier's first ${p.scoringBirds} birds home score. The season's first race sets the points: if it had N scoring birds, the fastest scoring bird in every race gets N points, the next N − 1, and so on (scoring birds placed beyond N get 0). A win is worth the same in every race.`
-      : `Each fancier's first ${p.scoringBirds} birds home score. Those birds are re-ranked by speed; with N scoring birds the fastest gets N points and the slowest 1.`,
+    p.scale === "fixed"
+      ? `Each fancier's first ${p.scoringBirds} birds home score. Those birds are ranked by speed: the fastest gets ${p.maxPoints} points, the next ${p.maxPoints! - 1}, and so on, one point less per bird (scoring birds placed beyond ${p.maxPoints} get 0). A win is worth the same in every race.`
+      : p.scale === "first-race"
+        ? `Each fancier's first ${p.scoringBirds} birds home score. The season's first race sets the points: if it had N scoring birds, the fastest scoring bird in every race gets N points, the next N − 1, and so on (scoring birds placed beyond N get 0). A win is worth the same in every race.`
+        : `Each fancier's first ${p.scoringBirds} birds home score. Those birds are re-ranked by speed; with N scoring birds the fastest gets N points and the slowest 1.`,
   parse(raw) {
     if (typeof raw !== "object" || raw === null) throw new RangeError("Parameters missing.");
     const r = raw as Record<string, unknown>;
     const scale = r.scale === undefined || r.scale === "" ? "race" : r.scale;
-    if (scale !== "race" && scale !== "first-race") throw new RangeError("Points scale must be each race or first race.");
-    return { scoringBirds: intField(r, topNFields[0]!), scale };
+    if (scale !== "race" && scale !== "first-race" && scale !== "fixed") throw new RangeError("Points scale must be each race, first race or fixed.");
+    const scoringBirds = intField(r, topNFields[0]!);
+    if (scale !== "fixed") return { scoringBirds, scale };
+    if (r.maxPoints === undefined || r.maxPoints === "") throw new RangeError("Set the points for the first bird to use the fixed scale.");
+    return { scoringBirds, scale, maxPoints: intField(r, topNFields[2]!) };
   },
-  score: (arrivals, p, overrides, _rp, ctx) =>
-    calculateRace(arrivals, { scoringBirds: p.scoringBirds, ...(p.scale === "first-race" && ctx?.baseBirds ? { baseN: ctx.baseBirds } : {}) }, overrides),
+  score(arrivals, p, overrides, _rp, ctx) {
+    const baseN = p.scale === "fixed" ? p.maxPoints : p.scale === "first-race" ? (ctx?.baseBirds ?? undefined) : undefined;
+    return calculateRace(arrivals, { scoringBirds: p.scoringBirds, ...(baseN ? { baseN } : {}) }, overrides);
+  },
 };
 
 /** Weighted by basketing: birds within the closing time score N − position + 1; total ÷ birds basketed. */

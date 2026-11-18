@@ -19,9 +19,12 @@ export function RulesPage() {
   const five = comps?.find((c) => c.system === "top-n-per-fancier") ?? null;
   const data = five;
   const x = Number(five?.params.scoringBirds ?? 5);
-  const firstRace = five?.params.scale === "first-race";
-  const scaleN = firstRace ? BASE_2026 : MOOI_N;
-  const glenn = GLENN.map((g) => ({ ...g, points: scaleN - g.scoring + 1 }));
+  const scale = String(five?.params.scale ?? "race");
+  const firstRace = scale === "first-race";
+  const fixed = scale === "fixed";
+  const maxPoints = Number(five?.params.maxPoints ?? 0);
+  const scaleN = fixed ? maxPoints : firstRace ? BASE_2026 : MOOI_N;
+  const glenn = GLENN.map((g) => ({ ...g, points: Math.max(0, scaleN - g.scoring + 1) }));
   const glennTotal = glenn.reduce((sum, g) => sum + g.points, 0);
   return (
     <>
@@ -43,7 +46,13 @@ export function RulesPage() {
           <ol className="list-decimal space-y-2 pl-5 text-sm leading-relaxed">
             <li>We start from Benzing's <strong>full result</strong>: every bird that came home, fastest (highest m/min) first. Benzing's own points and championships are not used.</li>
             <li>For each fancier we keep only their <strong>first {x} birds home</strong>, however late they arrive. Every other bird is removed.</li>
-            {firstRace ? (
+            {fixed ? (
+              <li>
+                The remaining <em>scoring birds</em> are ranked again by speed. The fastest scoring bird in <em>every</em> race gets{" "}
+                <strong>{maxPoints} points</strong>, the next {maxPoints - 1}, and so on, one point less per bird. A win is worth the same in every race; scoring birds
+                placed beyond {maxPoints} get 0.
+              </li>
+            ) : firstRace ? (
               <li>
                 The remaining <em>scoring birds</em> are ranked again by speed. <strong>The season's first race sets the points:</strong> if it had N scoring birds, the
                 fastest scoring bird in <em>every</em> race gets <strong>N points</strong>, the next N − 1, and so on. A win is worth the same in every race; in a smaller
@@ -66,7 +75,11 @@ export function RulesPage() {
         <Card title="Worked example: Mooi River, 4 July 2026">
           <p className="mb-3 text-sm leading-relaxed">
             372 birds basketed, 265 home, 7 fanciers. Keeping each fancier's first 5 birds leaves <strong>32 scoring birds</strong>.{" "}
-            {firstRace ? (
+            {fixed ? (
+              <>
+                The fastest scoring bird scores {maxPoints}, the next {maxPoints - 1}, and Mooi River's 32nd (last) scoring bird scores {Math.max(0, maxPoints - 31)}.
+              </>
+            ) : firstRace ? (
               <>
                 The 2026 scale comes from the first race, Matatiele 1, which had <strong>36 scoring birds</strong>: so the fastest scoring bird scores 36, the next 35,
                 and Mooi River's 32nd (last) scoring bird scores 5.
@@ -103,7 +116,7 @@ export function RulesPage() {
             </table>
           </TableWrap>
           <p className="mt-3 text-sm text-muted">
-            Further down it changes: Wesley Phillips' 3rd bird was 15th in the full result, but only 13th among scoring birds. The birds at 12 and 13 were Glenn's 6th and 7th, which don't count. So it scored {scaleN - 13 + 1} points.
+            Further down it changes: Wesley Phillips' 3rd bird was 15th in the full result, but only 13th among scoring birds. The birds at 12 and 13 were Glenn's 6th and 7th, which don't count. So it scored {Math.max(0, scaleN - 13 + 1)} points.
           </p>
         </Card>
         <p className="no-print pt-2 text-center text-xs text-muted">

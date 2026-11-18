@@ -334,6 +334,19 @@ describe("competitions (multiple result systems)", () => {
     expect(mr.fanciers.find((f) => f.fancierName === "Glenn Mcewan")).toMatchObject({ score: 142, benzingPositions: [5, 8, 9, 10, 11] });
   });
 
+  it("5-bird with a fixed scale: the first scoring bird gets the points the admin sets", async () => {
+    const { db, ctx } = setup();
+    const raceId = await mooiRiverId(ctx);
+    await calculateResults(ctx, raceId, ADMIN);
+    await expect(updateCompetition(ctx, 1, { params: { scoringBirds: 5, scale: "fixed" } }, ADMIN, 2026)).rejects.toThrow(/points for the first bird/);
+    expect(await updateCompetition(ctx, 1, { params: { scoringBirds: 5, scale: "fixed", maxPoints: 50 } }, ADMIN, 2026)).toEqual({ recalculate: true });
+    await recalculateRace(ctx, raceId, ADMIN, 1);
+    const d = draftOf(await adminRaceDetail(db, raceId, NOW))!;
+    expect([d.lines[0]!.points, d.lines.at(-1)!.points]).toEqual([50, 19]); // 32 scoring birds: 50 … 19
+    // Glenn: scoring places 5, 8, 9, 10, 11 → 46 + 43 + 42 + 41 + 40 = 212.
+    expect(d.fanciers[0]).toMatchObject({ fancierName: "Glenn Mcewan", score: 212 });
+  });
+
   it("best bird, distance bands, wins and top 25 %: standings by bird, by count and by season ratio", async () => {
     const { db, ctx } = setup();
     const raceId = await mooiRiverId(ctx);

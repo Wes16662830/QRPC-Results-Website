@@ -13,6 +13,12 @@ describe("scoring system registry", () => {
     expect(topNPerFancier.parse({ scoringBirds: 5, scale: "first-race" })).toEqual({ scoringBirds: 5, scale: "first-race" });
     expect(topNPerFancier.parse({ scoringBirds: 5, scale: "" })).toEqual({ scoringBirds: 5, scale: "race" });
     expect(() => topNPerFancier.parse({ scoringBirds: 5, scale: "x" })).toThrow(/Points scale/);
+    expect(topNPerFancier.parse({ scoringBirds: 5, scale: "fixed", maxPoints: "50" })).toEqual({ scoringBirds: 5, scale: "fixed", maxPoints: 50 });
+    expect(() => topNPerFancier.parse({ scoringBirds: 5, scale: "fixed", maxPoints: "" })).toThrow(/points for the first bird/);
+    expect(() => topNPerFancier.parse({ scoringBirds: 5, scale: "fixed" })).toThrow(/points for the first bird/);
+    expect(() => topNPerFancier.parse({ scoringBirds: 5, scale: "fixed", maxPoints: 0 })).toThrow(/1 to 1000/);
+    // maxPoints is ignored (and dropped) unless the scale is fixed.
+    expect(topNPerFancier.parse({ scoringBirds: 5, scale: "race", maxPoints: 50 })).toEqual({ scoringBirds: 5, scale: "race" });
     expect(() => topNPerFancier.parse(null)).toThrow(/missing/);
     expect(() => topNPerFancier.parse({ scoringBirds: 0 })).toThrow(/1 to 50/);
     expect(() => topNPerFancier.parse({ scoringBirds: 2.5 })).toThrow(/whole number/);
@@ -27,6 +33,12 @@ describe("scoring system registry", () => {
     expect(topNPerFancier.score(one, { scoringBirds: 5, scale: "first-race" }, [], null, { raceBasketed: null, baseBirds: 36 }).fanciers[0]!.score).toBe(36);
     // Until the first race has results, a race uses its own size.
     expect(topNPerFancier.score(one, { scoringBirds: 5, scale: "first-race" }, [], null, { raceBasketed: null, baseBirds: null }).fanciers[0]!.score).toBe(1);
+    // Fixed scale: first bird gets maxPoints, one less per bird, 0 beyond.
+    const three = [1, 2, 3].map((i) => ({ id: `f${i}`, fancierKey: `F${i}`, ring: `RF${i}`, speedMilli: 100 - i, benzingPosition: i, listOrder: i }));
+    expect(topNPerFancier.score(three, { scoringBirds: 5, scale: "fixed", maxPoints: 50 }, []).lines.map((l) => l.points)).toEqual([50, 49, 48]);
+    expect(topNPerFancier.score(three, { scoringBirds: 5, scale: "fixed", maxPoints: 2 }, []).lines.map((l) => l.points)).toEqual([2, 1]);
+    expect(topNPerFancier.describe({ scoringBirds: 5, scale: "fixed", maxPoints: 50 })).toMatch(/fastest gets 50 points, the next 49/);
+    expect(usesBaseRace(topNPerFancier as never, { scale: "fixed" })).toBe(false);
     expect(usesBaseRace(topNPerFancier as never, { scale: "first-race" })).toBe(true);
     expect(usesBaseRace(topNPerFancier as never, { scale: "race" })).toBe(false);
     expect(usesBaseRace(baseBirdPoints as never, {})).toBe(true);

@@ -629,7 +629,16 @@ interface AdminCompetition extends CompetitionInfo {
 interface SystemInfo {
   id: string;
   name: string;
-  fields: { key: string; label: string; type: "integer" | "time" | "select"; min?: number; max?: number; help?: string; options?: { value: string; label: string }[] }[];
+  fields: {
+    key: string;
+    label: string;
+    type: "integer" | "time" | "select";
+    min?: number;
+    max?: number;
+    help?: string;
+    options?: { value: string; label: string }[];
+    showWhen?: { key: string; value: string };
+  }[];
   raceFields?: { key: string; label: string }[];
   defaults: Record<string, unknown>;
 }
@@ -713,7 +722,9 @@ function CompetitionEditor({
           Name
           <input className="input mt-1" value={name} onChange={(e) => setName(e.target.value)} />
         </label>
-        {system?.fields.map((f) => <ParamInput key={f.key} f={f} params={params} setParams={setParams} />)}
+        {system?.fields
+          .filter((f) => !f.showWhen || String(params[f.showWhen.key] ?? "") === f.showWhen.value)
+          .map((f) => <ParamInput key={f.key} f={f} params={params} setParams={setParams} />)}
         <label className="block">
           Who can see it
           <select className="input mt-1" value={visibility} onChange={(e) => setVisibility(e.target.value as "members" | "admin")}>
@@ -844,7 +855,9 @@ function NewCompetition({ systems, season, onCreated }: { systems: SystemInfo[];
             ))}
           </select>
         </label>
-        {system?.fields.map((f) => <ParamInput key={f.key} f={f} params={params} setParams={setParams} />)}
+        {system?.fields
+          .filter((f) => !f.showWhen || String(params[f.showWhen.key] ?? "") === f.showWhen.value)
+          .map((f) => <ParamInput key={f.key} f={f} params={params} setParams={setParams} />)}
         <label className="block">
           Who can see it
           <select className="input mt-1" value={visibility} onChange={(e) => setVisibility(e.target.value as "members" | "admin")}>
@@ -879,12 +892,18 @@ function SettingsPage({ season, passwordSet }: { season: number; passwordSet: bo
   const races = useApi<RaceSummary[]>(`/api/admin/races?season=${season}`);
   const { running, runBulk, panel } = useBulk();
   const [publishReady, setPublishReady] = useState(false);
+  const [nothingToDo, setNothingToDo] = useState<string | null>(null);
 
   /** After a scoring change: re-score that competition race by race, then offer Publish all. */
   async function recalculate(competitionId: number, name: string) {
     await comps.reload();
     const list = (races.data ?? []).filter((r) => r.calculated);
     setPublishReady(false);
+    if (list.length === 0) {
+      setNothingToDo(`Saved. No ${season} races have results yet, so there was nothing to recalculate.`);
+      return;
+    }
+    setNothingToDo(null);
     await runBulk(`Recalculating ${name}`, list, (r) => recalcStep(r, competitionId));
     setPublishReady(true);
   }
@@ -901,6 +920,11 @@ function SettingsPage({ season, passwordSet }: { season: number; passwordSet: bo
     <>
       <PageTitle title="Settings" />
       {panel}
+      {nothingToDo && (
+        <div className="mb-4">
+          <Notice tone="info">{nothingToDo}</Notice>
+        </div>
+      )}
       {!publishReady && !running && (races.data ?? []).some((r) => r.draftWaiting) && (
         <div className="mb-4">
           <Notice>
