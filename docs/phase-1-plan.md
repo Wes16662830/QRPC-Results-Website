@@ -1,6 +1,14 @@
 # Phase 1 plan: architecture, data model and pages
 
-Status: **approved 18 Nov 2026.** The points engine, the result parser and the acceptance test are built.
+Status: **built (18 Nov 2026).** Changes since the first plan, all agreed with Wes:
+
+- **No automatic result polling.** Results are fetched when an admin presses **Calculate results**, and the race list when they press **Sync races**.
+  Live polling runs every **5 minutes**, only while a race is active.
+- **Multiple competitions.** The 5-bird championship is one competition. Others, with their own point systems, settings and
+  race selection, can be added (tables `competition`, `competition_version`, `competition_exclusion`, which replace `settings_version`).
+- **Season standings are computed on read** from published race results and the competition's current version.
+  They are not stored separately; every published race calculation records its inputs and version.
+- **Raw SQL with D1, not Drizzle.** The data access is small enough that an ORM added only weight.
 
 ## Decisions so far (18 Nov 2026)
 

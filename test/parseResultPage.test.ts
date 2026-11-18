@@ -13,12 +13,17 @@ describe("field parsers", () => {
     expect(parseSpeedMilli("1 279,742")).toBe(1279742);
     expect(parseSpeedMilli("30,380")).toBe(30380);
     expect(parseDistanceM("477.685")).toBe(477685);
+    // Real Benzing output drops trailing zeros (Matatiele 1, Ladysmith 1, Newcastle 2).
+    expect(parseDistanceM("305.34")).toBe(305340);
+    expect(parseDistanceM("511.5")).toBe(511500);
+    expect(parseDistanceM("590")).toBe(590000);
     expect(parseArrival("(12) 10:40:28")).toEqual({ day: 12, time: "10:40:28" });
     expect(parseArrival("14:28:13")).toEqual({ day: 1, time: "14:28:13" });
   });
   it("rejects unexpected formats", () => {
     expect(() => parseSpeedMilli("1279.742")).toThrow(BenzingParseError);
     expect(() => parseDistanceM("477,685")).toThrow(BenzingParseError);
+    expect(() => parseDistanceM("477.6851")).toThrow(BenzingParseError);
     expect(() => parseArrival("2:00")).toThrow(BenzingParseError);
   });
 });

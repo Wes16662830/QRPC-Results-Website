@@ -18,8 +18,6 @@ export function ScoreTable({ calc, rules }: { calc: CalcView; rules?: string }) 
             <tr>
               <th className="num">#</th>
               <th>Fancier</th>
-              <th className="num">Birds</th>
-              <th>Places in full result</th>
               <th className="num">Points</th>
             </tr>
           </thead>
@@ -27,22 +25,23 @@ export function ScoreTable({ calc, rules }: { calc: CalcView; rules?: string }) 
             {calc.fanciers.map((f) => (
               <Fragment key={f.fancierId}>
                 <tr className="cursor-pointer" onClick={() => setOpen(open === f.fancierId ? null : f.fancierId)}>
-                  <td className="num text-muted">{f.rank ?? "="}</td>
-                  <td>
+                  <td className="num align-top text-muted">{f.rank ?? "="}</td>
+                  <td className="whitespace-normal">
                     <FancierLink id={f.fancierId} name={f.fancierName} />
+                    <div className="text-xs text-muted">
+                      {f.birdsScored} bird{f.birdsScored === 1 ? "" : "s"} · places {f.benzingPositions.join(", ")}
+                    </div>
                   </td>
-                  <td className="num">{f.birdsScored}</td>
-                  <td className="text-muted">{f.benzingPositions.join(", ")}</td>
-                  <td className="num text-base font-bold">{f.score}</td>
+                  <td className="num align-top text-base font-bold">{f.score}</td>
                 </tr>
                 {open === f.fancierId && (
                   <tr className="bg-surface-2">
-                    <td colSpan={5}>
+                    <td colSpan={3} className="whitespace-normal">
                       <div className="py-1 text-sm">
                         {calc.lines
                           .filter((l) => l.fancierId === f.fancierId)
                           .map((l) => (
-                            <div key={l.ring} className="flex justify-between gap-4">
+                            <div key={l.ring} className="flex flex-wrap justify-between gap-x-4">
                               <span>
                                 {l.ring} · {fmtArrival(l.arrivalDay, l.arrivalTime)} · {fmtSpeed(l.speed)} m/min
                               </span>
@@ -138,7 +137,7 @@ export function FullResult({ rows, highlight, highlightLabel }: { rows: FullRow[
                 <td className="text-muted">{r.ring}</td>
                 <td>{fmtArrival(r.arrivalDay, r.arrivalTime)}</td>
                 <td className="num">{fmtSpeed(r.speed)}</td>
-                <td className="num text-muted">{r.distanceKm.toFixed(3)}</td>
+                <td className="num text-muted">{r.distanceKm.toLocaleString("en-ZA", { minimumFractionDigits: 3 })}</td>
                 <td className="num text-muted">{r.loft}</td>
               </tr>
             ))}

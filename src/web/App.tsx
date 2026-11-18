@@ -87,7 +87,7 @@ export function App() {
       {location.pathname !== "/login" && <Header admin={admin} member={member} />}
       <main className="mx-auto max-w-5xl px-4 py-5">
         <Routes>
-          <Route path="/login" element={<LoginPage onLoggedIn={() => session.reload()} />} />
+          <Route path="/login" element={<LoginPage onLoggedIn={session.reload} />} />
           <Route path="/" element={<HomePage />} />
           <Route path="/races" element={<RacesPage />} />
           <Route path="/races/:id" element={<RacePage />} />

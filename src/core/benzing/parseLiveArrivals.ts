@@ -50,11 +50,11 @@ function str(o: Record<string, unknown>, k: string): string {
   return v;
 }
 
-/** "1279.742" → 1279742 */
+/** "1279.742" → 1279742 ; tolerates dropped trailing zeros ("1094.04" → 1094040). */
 export function parseLiveSpeedMilli(raw: string): number {
-  const m = /^(\d+)\.(\d{3})$/.exec(raw);
+  const m = /^(\d+)(?:\.(\d{1,3}))?$/.exec(raw);
   if (!m) throw new BenzingParseError(`Unexpected live speed format: "${raw}"`);
-  return Number(m[1]) * 1000 + Number(m[2]);
+  return Number(m[1]) * 1000 + Number((m[2] ?? "").padEnd(3, "0"));
 }
 
 export function parseLiveArrivalsPage(json: unknown): LiveArrivalsPage {

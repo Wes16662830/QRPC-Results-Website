@@ -83,11 +83,11 @@ export function parseSpeedMilli(raw: string): number {
   return Number(m[1]!.replace(/ /g, "")) * 1000 + Number(m[2]);
 }
 
-/** "477.685" (km) → 477685 (m). */
+/** "477.685" (km) → 477685 (m). Benzing drops trailing zeros: "305.34" = 305.340 km, "511.5" = 511.500 km. */
 export function parseDistanceM(raw: string): number {
-  const m = /^(\d+)\.(\d{3})$/.exec(raw.trim());
+  const m = /^(\d+)(?:\.(\d{1,3}))?$/.exec(raw.trim());
   if (!m) throw new BenzingParseError(`Unexpected distance format: "${raw}"`);
-  return Number(m[1]) * 1000 + Number(m[2]);
+  return Number(m[1]) * 1000 + Number((m[2] ?? "").padEnd(3, "0"));
 }
 
 /** "14:28:13" → day 1; "(12) 10:40:28" → day 12. */

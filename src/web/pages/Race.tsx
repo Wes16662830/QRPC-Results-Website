@@ -36,7 +36,10 @@ export function RacePage() {
         <Stat label="Basketed" value={race.basketed ?? "–"} />
         <Stat label="Home" value={data.returned || "–"} />
         <Stat label="Fanciers" value={race.fanciers ?? "–"} />
-        <Stat label="Distance" value={fmtKm(race.minDistanceKm)} />
+        <Stat
+          label="Distance"
+          value={race.minDistanceKm && race.maxDistanceKm && Math.round(race.maxDistanceKm) !== Math.round(race.minDistanceKm) ? `${Math.round(race.minDistanceKm)}–${Math.round(race.maxDistanceKm)} km` : fmtKm(race.minDistanceKm)}
+        />
       </div>
 
       <Tabs<Tab>

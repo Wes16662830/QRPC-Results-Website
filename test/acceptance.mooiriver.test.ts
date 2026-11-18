@@ -54,3 +54,13 @@ describe("Mooi River 2026 acceptance", () => {
     expect(calc.fanciers.reduce((s, f) => s + f.score, 0)).toBe((32 * 33) / 2);
   });
 });
+
+describe("Matatiele 1 2026 (distances with dropped trailing zeros)", () => {
+  it("parses and validates the full sheet", () => {
+    const m1 = parseResultPage(readFileSync(new URL("../fixtures/benzing/r-6429-t-17076-matatiele-1.html", import.meta.url), "utf8"));
+    expect(m1.arrivals).toHaveLength(322);
+    expect(validateResultPage(m1)).toEqual([]);
+    expect(m1.arrivals.every((a) => a.distanceM > 100_000 && a.distanceM < 1_000_000)).toBe(true);
+    expect(m1.arrivals.reduce((s, a) => s.add(a.fancierName), new Set<string>()).size).toBe(8);
+  });
+});

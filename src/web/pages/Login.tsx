@@ -3,7 +3,7 @@ import { useNavigate } from "react-router";
 import { post } from "../api";
 import { ErrorBox } from "../ui";
 
-export function LoginPage({ onLoggedIn }: { onLoggedIn: () => void }) {
+export function LoginPage({ onLoggedIn }: { onLoggedIn: () => Promise<void> }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -24,7 +24,7 @@ export function LoginPage({ onLoggedIn }: { onLoggedIn: () => void }) {
           setError(null);
           try {
             await post("/api/login", { password });
-            onLoggedIn();
+            await onLoggedIn();
             navigate("/", { replace: true });
           } catch (err) {
             setError((err as Error).message);

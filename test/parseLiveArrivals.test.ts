@@ -47,6 +47,8 @@ describe("live parser failures", () => {
     expect(() => parseLiveArrivalsPage(withArrival({ time_of_arrival: "1:2" }))).toThrow(/arrival time/);
     expect(() => parseLiveArrivalsPage(withArrival({ distance: "477.685" }))).toThrow(/distance/);
     expect(() => parseLiveSpeedMilli("1279,742")).toThrow(/speed/);
+    expect(parseLiveSpeedMilli("1094.04")).toBe(1094040);
+    expect(parseLiveSpeedMilli("1094")).toBe(1094000);
   });
 
   it("accepts a missing nomination", () => {
