@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, NavLink, Route, Routes, useParams } from "react-router";
-import { post } from "../api";
+import { ApiError, post } from "../api";
 import { fmtDate, fmtDateTime } from "../format";
 import { useApi } from "../hooks";
 import { ScoreTable } from "../results";
@@ -169,9 +169,65 @@ function OverviewPage({ o, reload }: { o: Overview; reload: () => void }) {
   );
 }
 
+type BulkLine = { name: string; ok: boolean | null; text: string };
+
+/** Runs an admin action race by race (one request each, so free-plan limits apply per race). */
+function BulkPanel({ lines, running, title }: { lines: BulkLine[]; running: boolean; title: string }) {
+  if (!lines.length) return null;
+  return (
+    <Card title={running ? `${title}…` : title} className="mb-4">
+      <ul className="space-y-1 text-sm">
+        {lines.map((l) => (
+          <li key={l.name} className={l.ok === null ? "text-muted" : l.ok ? "text-good" : "text-warn"}>
+            {l.ok === null ? "⏳" : l.ok ? "✓" : "!"} <strong>{l.name}</strong> – {l.text}
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
 function AdminRaces({ season }: { season: number }) {
   const { data, error, reload } = useApi<RaceSummary[]>(`/api/admin/races?season=${season}`);
   const recalc = useAction();
+  const [bulk, setBulk] = useState<{ title: string; lines: BulkLine[]; running: boolean }>({ title: "", lines: [], running: false });
+
+  async function runBulk(title: string, races: RaceSummary[], step: (r: RaceSummary) => Promise<{ ok: boolean; text: string }>) {
+    const lines: BulkLine[] = races.map((r) => ({ name: r.name, ok: null, text: "waiting" }));
+    setBulk({ title, lines: [...lines], running: true });
+    for (let i = 0; i < races.length; i++) {
+      lines[i] = { name: races[i]!.name, ok: null, text: "working…" };
+      setBulk({ title, lines: [...lines], running: true });
+      try {
+        lines[i] = { name: races[i]!.name, ...(await step(races[i]!)) };
+      } catch (e) {
+        lines[i] = { name: races[i]!.name, ok: false, text: (e as Error).message };
+      }
+      setBulk({ title, lines: [...lines], running: true });
+    }
+    setBulk({ title, lines, running: false });
+    await reload();
+  }
+
+  const toCalculate = (data ?? []).filter((r) => r.kind === "race" && !r.calculated && r.state !== "upcoming");
+  const toPublish = (data ?? []).filter((r) => r.draftWaiting);
+
+  const calculateAll = () =>
+    runBulk("Calculate all", toCalculate, async (r) => {
+      const res = await post<{ changed: boolean; warnings: string[] }>(`/api/admin/races/${r.id}/calculate`);
+      return { ok: true, text: res.changed ? `draft created${res.warnings.length ? ` (${res.warnings.length} note${res.warnings.length > 1 ? "s" : ""})` : ""}` : "no change since last calculation" };
+    });
+
+  const publishAll = () =>
+    runBulk("Publish all", toPublish, async (r) => {
+      try {
+        await post(`/api/admin/races/${r.id}/publish`, { acknowledgeWarnings: false });
+        return { ok: true, text: "published" };
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 409) return { ok: false, text: "has warnings – open the race, review and publish it there" };
+        throw e;
+      }
+    });
   if (error) return <ErrorBox error={error} />;
   if (!data) return <Loading />;
   const update = async (id: number, patch: Record<string, unknown>) => {
@@ -183,12 +239,21 @@ function AdminRaces({ season }: { season: number }) {
       <PageTitle
         title={`Races ${season}`}
         actions={
-          <button className="btn" disabled={recalc.busy} onClick={() => recalc.run(() => post<{ changed: boolean }[]>("/api/admin/recalculate-season", { season }), (r) => `${(r as { changed: boolean }[]).filter((x) => x.changed).length} new drafts to review.`)}>
+          <>
+          <button className="btn btn-primary" disabled={bulk.running || toCalculate.length === 0} onClick={calculateAll} title="Import and calculate every race that has no results yet">
+            Calculate all{toCalculate.length ? ` (${toCalculate.length})` : ""}
+          </button>
+          <button className="btn btn-primary" disabled={bulk.running || toPublish.length === 0} onClick={publishAll} title="Publish every race that has a draft waiting">
+            Publish all{toPublish.length ? ` (${toPublish.length})` : ""}
+          </button>
+          <button className="btn" disabled={recalc.busy || bulk.running} onClick={() => recalc.run(() => post<{ changed: boolean }[]>("/api/admin/recalculate-season", { season }), (r) => `${(r as { changed: boolean }[]).filter((x) => x.changed).length} new drafts to review.`)}>
             Recalculate season
           </button>
+          </>
         }
       />
       {recalc.view}
+      <BulkPanel lines={bulk.lines} running={bulk.running} title={bulk.title} />
       {data.length === 0 && <Notice tone="info">No races yet. Use Sync races on the Overview tab.</Notice>}
       <Card className="mt-2">
         <TableWrap>

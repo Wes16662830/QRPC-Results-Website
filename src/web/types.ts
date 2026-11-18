@@ -17,6 +17,10 @@ export interface RaceSummary {
   included: boolean;
   liveMode: "auto" | "on" | "off";
   state: RaceState;
+  /** Only on race lists: */
+  calculated?: boolean;
+  draftWaiting?: boolean;
+  hasFullResult?: boolean;
 }
 
 export interface FullRow {

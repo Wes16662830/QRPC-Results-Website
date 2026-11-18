@@ -86,9 +86,24 @@ export async function defaultSeason(db: D1Database, now: Date): Promise<number> 
 }
 
 export async function listRaces(db: D1Database, season: number, now: Date) {
-  const rows = await db.prepare("SELECT * FROM race WHERE club_id = ? AND season = ? ORDER BY race_date, race_number").bind(CLUB_ID, season).all<RaceRow>();
+  const rows = await db
+    .prepare(
+      `SELECT r.*,
+        EXISTS (SELECT 1 FROM snapshot s WHERE s.race_id = r.id AND s.source = 'sheet') AS has_sheet,
+        EXISTS (SELECT 1 FROM race_calc c WHERE c.race_id = r.id AND c.status = 'draft') AS has_draft_calc
+       FROM race r WHERE r.club_id = ? AND r.season = ? ORDER BY r.race_date, r.race_number`,
+    )
+    .bind(CLUB_ID, season)
+    .all<RaceRow & { has_sheet: number; has_draft_calc: number }>();
   const states = await raceStates(db, now);
-  return rows.results.map((r) => raceSummary(r, states.get(r.id)!));
+  return rows.results.map((r) => ({
+    ...raceSummary(r, states.get(r.id)!),
+    /** Results imported from Benzing at least once. */
+    calculated: r.has_sheet === 1,
+    /** A draft is waiting to be published (possibly replacing a published result). */
+    draftWaiting: r.has_draft_calc === 1,
+    hasFullResult: r.full_result_id !== null,
+  }));
 }
 
 function decorateCalc(calc: StoredCalcResult, names: Map<string, string>, arrivals: StoredArrival[]) {

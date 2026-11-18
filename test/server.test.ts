@@ -355,8 +355,11 @@ describe("HTTP API", () => {
     const races = (await (await call("/api/admin/races?season=2026")).json()) as { id: number; benzingRaceId: number; state: string }[];
     const mooi = races.find((r) => r.benzingRaceId === 6975)!;
     expect(mooi.state).toBe("awaiting");
-    const calc = (await (await call(`/api/admin/races/${mooi.id}/calculate`, { method: "POST", body: "{}" })).json()) as { calcId: number };
-    expect((await call(`/api/admin/races/${mooi.id}/publish`, { method: "POST", body: JSON.stringify({ calcId: calc.calcId }) })).status).toBe(200);
+    expect(mooi).toMatchObject({ calculated: false, draftWaiting: false, hasFullResult: true });
+    await call(`/api/admin/races/${mooi.id}/calculate`, { method: "POST", body: "{}" });
+    const afterCalc = (await (await call("/api/admin/races?season=2026")).json()) as { benzingRaceId: number; calculated: boolean; draftWaiting: boolean }[];
+    expect(afterCalc.find((r) => r.benzingRaceId === 6975)).toMatchObject({ calculated: true, draftWaiting: true });
+    expect((await call(`/api/admin/races/${mooi.id}/publish`, { method: "POST", body: "{}" })).status).toBe(200);
     expect((await call("/api/admin/member-password", { method: "POST", body: JSON.stringify({ password: "short" }) })).status).toBe(400);
     expect((await call("/api/admin/member-password", { method: "POST", body: JSON.stringify({ password: "pigeons-2026" }) })).status).toBe(200);
 
