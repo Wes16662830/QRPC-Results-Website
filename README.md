@@ -64,6 +64,9 @@ After that, deploying is just `git push`.
 
 ## Adding result / point systems
 
+- **Season-wide jobs run race by race.** Cloudflare's free plan allows about 50 database queries per request, so
+  *Recalculate season*, *Recalculate & publish all*, *Calculate all* and *Publish all* send one request per race
+  from the admin page. Calculating one race costs about 25 queries however many competitions there are.
 - **New competition using an existing system** (for example a 3-bird or 10-bird championship): Admin → Settings → *Add a competition*.
   No code needed. Drafts are created for every race that already has results.
 - **New point system:** implement `ScoringSystem` in `src/core/scoring/systems.ts` and register it in `SYSTEMS`.

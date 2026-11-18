@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, NavLink, Route, Routes, useParams } from "react-router";
-import { ApiError, post } from "../api";
+import { ApiError, get, post } from "../api";
 import { fmtDate, fmtDateTime } from "../format";
 import { useApi } from "../hooks";
 import { ChampionshipPage } from "../pages/Championship";
@@ -190,12 +190,12 @@ function BulkPanel({ lines, running, title }: { lines: BulkLine[]; running: bool
   );
 }
 
-function AdminRaces({ season }: { season: number }) {
-  const { data, error, reload } = useApi<RaceSummary[]>(`/api/admin/races?season=${season}`);
-  const recalc = useAction();
-  const [bulk, setBulk] = useState<{ title: string; lines: BulkLine[]; running: boolean }>({ title: "", lines: [], running: false });
+type StepResult = { ok: boolean; text: string };
 
-  async function runBulk(title: string, races: RaceSummary[], step: (r: RaceSummary) => Promise<{ ok: boolean; text: string }>) {
+/** Race-by-race runner: one request per race, so each stays inside Cloudflare's free-plan limits. */
+function useBulk(onDone?: () => unknown) {
+  const [bulk, setBulk] = useState<{ title: string; lines: BulkLine[]; running: boolean }>({ title: "", lines: [], running: false });
+  async function runBulk(title: string, races: RaceSummary[], step: (r: RaceSummary) => Promise<StepResult>) {
     const lines: BulkLine[] = races.map((r) => ({ name: r.name, ok: null, text: "waiting" }));
     setBulk({ title, lines: [...lines], running: true });
     for (let i = 0; i < races.length; i++) {
@@ -209,8 +209,39 @@ function AdminRaces({ season }: { season: number }) {
       setBulk({ title, lines: [...lines], running: true });
     }
     setBulk({ title, lines, running: false });
-    await reload();
+    await onDone?.();
+    return lines;
   }
+  const panel = <BulkPanel lines={bulk.lines} running={bulk.running} title={bulk.title} />;
+  return { running: bulk.running, runBulk, panel };
+}
+
+/** Recalculate one race from stored results (all competitions, or one). */
+async function recalcStep(r: RaceSummary, competitionId?: number): Promise<StepResult> {
+  const res = await post<{ changed: boolean; drafts: { changed: boolean; skipped?: string }[] }>(`/api/admin/races/${r.id}/recalculate`, competitionId ? { competitionId } : {});
+  const changed = res.drafts.filter((d) => d.changed).length;
+  const skipped = res.drafts.filter((d) => d.skipped && !/Not one of the races picked/.test(d.skipped)).length;
+  return {
+    ok: true,
+    text: `${changed ? `${changed} new draft${changed > 1 ? "s" : ""}` : "no changes"}${skipped ? ` · ${skipped} skipped (needs settings – see race page)` : ""}`,
+  };
+}
+
+/** Publish a race's waiting drafts; drafts with warnings are left for review on the race page. */
+async function publishStep(r: RaceSummary): Promise<StepResult> {
+  try {
+    await post(`/api/admin/races/${r.id}/publish`, { acknowledgeWarnings: false });
+    return { ok: true, text: "published" };
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 409) return { ok: false, text: "has warnings – open the race, review and publish it there" };
+    if (e instanceof ApiError && /no draft/i.test(e.message)) return { ok: true, text: "nothing to publish" };
+    throw e;
+  }
+}
+
+function AdminRaces({ season }: { season: number }) {
+  const { data, error, reload } = useApi<RaceSummary[]>(`/api/admin/races?season=${season}`);
+  const { running, runBulk, panel } = useBulk(reload);
 
   const toCalculate = (data ?? []).filter((r) => r.kind === "race" && !r.calculated && r.state !== "upcoming");
   const toPublish = (data ?? []).filter((r) => r.draftWaiting);
@@ -226,15 +257,14 @@ function AdminRaces({ season }: { season: number }) {
       return { ok: true, text: `${res.changed ? "draft created" : "no change since last calculation"}${notes.length ? ` (${notes.join("; ")})` : ""}` };
     });
 
-  const publishAll = () =>
-    runBulk("Publish all", toPublish, async (r) => {
-      try {
-        await post(`/api/admin/races/${r.id}/publish`, { acknowledgeWarnings: false });
-        return { ok: true, text: "published" };
-      } catch (e) {
-        if (e instanceof ApiError && e.status === 409) return { ok: false, text: "has warnings – open the race, review and publish it there" };
-        throw e;
-      }
+  const publishAll = () => runBulk("Publish all", toPublish, publishStep);
+  const calculated = (data ?? []).filter((r) => r.calculated);
+  const recalcSeason = () => runBulk("Recalculate season", calculated, (r) => recalcStep(r));
+  const recalcAndPublish = () =>
+    runBulk("Recalculate & publish all", calculated, async (r) => {
+      const a = await recalcStep(r);
+      const b = await publishStep(r);
+      return { ok: b.ok, text: `${a.text} · ${b.text}` };
     });
   if (error) return <ErrorBox error={error} />;
   if (!data) return <Loading />;
@@ -248,20 +278,22 @@ function AdminRaces({ season }: { season: number }) {
         title={`Races ${season}`}
         actions={
           <>
-          <button className="btn btn-primary" disabled={bulk.running || toCalculate.length === 0} onClick={calculateAll} title="Import and calculate every race that has no results yet">
+          <button className="btn btn-primary" disabled={running || toCalculate.length === 0} onClick={calculateAll} title="Import and calculate every race that has no results yet">
             Calculate all{toCalculate.length ? ` (${toCalculate.length})` : ""}
           </button>
-          <button className="btn btn-primary" disabled={bulk.running || toPublish.length === 0} onClick={publishAll} title="Publish every race that has a draft waiting">
+          <button className="btn btn-primary" disabled={running || toPublish.length === 0} onClick={publishAll} title="Publish every race that has a draft waiting">
             Publish all{toPublish.length ? ` (${toPublish.length})` : ""}
           </button>
-          <button className="btn" disabled={recalc.busy || bulk.running} onClick={() => recalc.run(() => post<{ changed: boolean }[]>("/api/admin/recalculate-season", { season }), (r) => `${(r as { changed: boolean }[]).filter((x) => x.changed).length} new drafts to review.`)}>
+          <button className="btn" disabled={running || calculated.length === 0} onClick={recalcSeason} title="Re-score every calculated race from its stored results (no Benzing calls)">
             Recalculate season
+          </button>
+          <button className="btn" disabled={running || calculated.length === 0} onClick={recalcAndPublish} title="Re-score every calculated race, then publish it">
+            Recalculate &amp; publish all
           </button>
           </>
         }
       />
-      {recalc.view}
-      <BulkPanel lines={bulk.lines} running={bulk.running} title={bulk.title} />
+      {panel}
       {data.length === 0 && <Notice tone="info">No races yet. Use Sync races on the Overview tab.</Notice>}
       <Card className="mt-2">
         <TableWrap>
@@ -317,29 +349,51 @@ function AdminRaces({ season }: { season: number }) {
   );
 }
 
-/** Per-race settings for a competition (e.g. the weighted system's closing day and time). */
+/**
+ * Per-race settings for a competition (e.g. the weighted system's closing day and time).
+ * The competition's default applies unless the race has its own; an override equal to the default isn't kept.
+ */
 function RaceParamsCard({ raceId, result, onSaved }: { raceId: number; result: CompetitionResult; onSaved: () => Promise<void> | void }) {
   const fields = result.competition.raceFields;
-  const [values, setValues] = useState<Record<string, string>>(
-    Object.fromEntries(fields.map((f) => [f.key, result.raceParams?.[f.key] === undefined ? "" : String(result.raceParams[f.key])])),
-  );
+  const defaults = result.competition.params;
+  const hasDefault = fields.every((f) => defaults[f.key] !== undefined && defaults[f.key] !== "");
+  const source = result.raceParams ?? (hasDefault ? defaults : {});
+  const fromSource = () => Object.fromEntries(fields.map((f) => [f.key, source[f.key] === undefined ? "" : String(source[f.key])]));
+  const [values, setValues] = useState<Record<string, string>>(fromSource);
+  // Refresh the inputs when the saved setting or the default changes (the card itself stays, so its message does too).
+  const sourceKey = JSON.stringify(source);
+  useEffect(() => setValues(fromSource()), [sourceKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const save = useAction();
+  const describe = (p: Record<string, unknown>) => fields.map((f) => `${f.label.charAt(0).toLowerCase()}${f.label.slice(1)} ${String(p[f.key])}`).join(", ");
+  const submit = (body: Record<string, unknown>) =>
+    save.run(async () => {
+      const r = await post<{ changed: boolean; usesDefault: boolean; sameAsDefault: boolean }>(`/api/admin/competitions/${result.competition.id}/races/${raceId}/params`, body);
+      await onSaved();
+      return r;
+    }, (res) => {
+      const r = res as { changed: boolean; usesDefault: boolean; sameAsDefault: boolean };
+      const base = r.sameAsDefault ? "Same as the default, so this race just uses the default." : r.usesDefault ? "This race now uses the default." : "Saved for this race.";
+      return `${base}${r.changed ? " A new draft was created – review it above and publish." : ""}`;
+    });
   return (
     <Card title={`${result.competition.name}: race settings`} className="mb-4">
-      {!result.raceParams && (
-        <div className="mb-3">
-          <Notice>Not set yet, so {result.competition.name} doesn't score this race.</Notice>
-        </div>
-      )}
+      <div className="mb-3">
+        {result.raceParams ? (
+          <Notice tone="info">
+            <strong>This race has its own setting</strong> ({describe(result.raceParams)}).
+            {hasDefault ? ` The default is ${describe(defaults)}.` : " There is no default."}
+          </Notice>
+        ) : hasDefault ? (
+          <Notice tone="info">Using the competition default: {describe(defaults)}. Change it below only if this race is different.</Notice>
+        ) : (
+          <Notice>No default is set (Settings) and this race has no setting, so {result.competition.name} doesn't score this race.</Notice>
+        )}
+      </div>
       <form
         className="flex flex-wrap items-end gap-3 text-sm"
         onSubmit={(e) => {
           e.preventDefault();
-          void save.run(async () => {
-            const r = await post<{ changed: boolean }>(`/api/admin/competitions/${result.competition.id}/races/${raceId}/params`, values);
-            await onSaved();
-            return r;
-          }, (r) => ((r as { changed: boolean }).changed ? "Saved. A new draft was created – review it above and publish." : "Saved."));
+          void submit(values);
         }}
       >
         {fields.map((f) => (
@@ -357,8 +411,13 @@ function RaceParamsCard({ raceId, result, onSaved }: { raceId: number; result: C
           </label>
         ))}
         <button className="btn btn-primary" disabled={save.busy || fields.some((f) => !values[f.key])}>
-          Save
+          Save for this race
         </button>
+        {result.raceParams && hasDefault && (
+          <button type="button" className="btn" disabled={save.busy} onClick={() => void submit({ clear: true })}>
+            Use default
+          </button>
+        )}
       </form>
       {save.view}
     </Card>
@@ -460,7 +519,7 @@ function AdminRace() {
       )}
 
       {data.results.filter((r) => r.competition.raceFields.length > 0 && r.competition.active).map((r) => (
-        <RaceParamsCard key={`params-${r.competition.slug}-${JSON.stringify(r.raceParams)}`} raceId={race.id} result={r} onSaved={reload} />
+        <RaceParamsCard key={`params-${r.competition.slug}`} raceId={race.id} result={r} onSaved={reload} />
       ))}
 
       <Card title="Published results" className="mb-4">
@@ -565,12 +624,47 @@ interface AdminCompetition extends CompetitionInfo {
 interface SystemInfo {
   id: string;
   name: string;
-  fields: { key: string; label: string; type: "integer" | "time"; min?: number; max?: number }[];
+  fields: { key: string; label: string; type: "integer" | "time"; min?: number; max?: number; help?: string }[];
   raceFields?: { key: string; label: string }[];
   defaults: Record<string, unknown>;
 }
 
-function CompetitionEditor({ comp, systems, races, season, onSaved }: { comp: AdminCompetition; systems: SystemInfo[]; races: RaceSummary[]; season: number; onSaved: () => void }) {
+type FieldDef = SystemInfo["fields"][number] & { help?: string };
+
+/** One competition parameter: whole number or time, blank allowed (e.g. an optional default closing). */
+function ParamInput({ f, params, setParams }: { f: FieldDef; params: Record<string, unknown>; setParams: (p: Record<string, unknown>) => void }) {
+  const v = params[f.key];
+  return (
+    <label className="block">
+      {f.label}
+      <input
+        className="input mt-1"
+        type={f.type === "time" ? "time" : "number"}
+        min={f.min}
+        max={f.max}
+        value={v === undefined || v === null ? "" : String(v)}
+        onChange={(e) => setParams({ ...params, [f.key]: e.target.value === "" ? "" : f.type === "time" ? e.target.value : Number(e.target.value) })}
+      />
+      {f.help && <span className="mt-0.5 block text-xs text-muted">{f.help}</span>}
+    </label>
+  );
+}
+
+function CompetitionEditor({
+  comp,
+  systems,
+  races,
+  season,
+  onSaved,
+  onRecalculate,
+}: {
+  comp: AdminCompetition;
+  systems: SystemInfo[];
+  races: RaceSummary[];
+  season: number;
+  onSaved: () => void;
+  onRecalculate: (competitionId: number, name: string) => void;
+}) {
   const system = systems.find((s) => s.id === comp.system);
   const [name, setName] = useState(comp.name);
   const [params, setParams] = useState<Record<string, unknown>>(comp.params);
@@ -587,25 +681,18 @@ function CompetitionEditor({ comp, systems, races, season, onSaved }: { comp: Ad
         onSubmit={(e) => {
           e.preventDefault();
           void save.run(async () => {
-            const r = await post<{ newDrafts: number }>(`/api/admin/competitions/${comp.id}`, { name, params, racesCounted, bestX, visibility, raceSelection, season });
-            onSaved();
+            const r = await post<{ recalculate: boolean }>(`/api/admin/competitions/${comp.id}`, { name, params, racesCounted, bestX, visibility, raceSelection, season });
+            if (r.recalculate) onRecalculate(comp.id, name);
+            else onSaved();
             return r;
-          }, (r) => {
-            const n = (r as { newDrafts: number }).newDrafts;
-            return n ? `Saved. ${n} race(s) have new drafts to review and publish.` : "Saved.";
-          });
+          }, (r) => ((r as { recalculate: boolean }).recalculate ? "Saved – recalculating the races (see the panel at the top)." : "Saved."));
         }}
       >
         <label className="block">
           Name
           <input className="input mt-1" value={name} onChange={(e) => setName(e.target.value)} />
         </label>
-        {system?.fields.map((f) => (
-          <label key={f.key} className="block">
-            {f.label}
-            <input className="input mt-1" type="number" min={f.min} max={f.max} value={String(params[f.key] ?? "")} onChange={(e) => setParams({ ...params, [f.key]: Number(e.target.value) })} />
-          </label>
-        ))}
+        {system?.fields.map((f) => <ParamInput key={f.key} f={f} params={params} setParams={setParams} />)}
         <label className="block">
           Who can see it
           <select className="input mt-1" value={visibility} onChange={(e) => setVisibility(e.target.value as "members" | "admin")}>
@@ -649,9 +736,10 @@ function CompetitionEditor({ comp, systems, races, season, onSaved }: { comp: Ad
             className="btn"
             disabled={save.busy}
             onClick={() => save.run(async () => {
-              await post(`/api/admin/competitions/${comp.id}`, { active: !comp.active, season });
-              onSaved();
-            }, comp.active ? "Deactivated: hidden from members." : "Activated.")}
+              const r = await post<{ recalculate: boolean }>(`/api/admin/competitions/${comp.id}`, { active: !comp.active, season });
+              if (r.recalculate) onRecalculate(comp.id, name);
+              else onSaved();
+            }, comp.active ? "Deactivated: hidden from members." : "Activated – recalculating the races.")}
           >
             {comp.active ? "Deactivate" : "Activate"}
           </button>
@@ -696,7 +784,7 @@ function CompetitionEditor({ comp, systems, races, season, onSaved }: { comp: Ad
   );
 }
 
-function NewCompetition({ systems, season, onCreated }: { systems: SystemInfo[]; season: number; onCreated: () => void }) {
+function NewCompetition({ systems, season, onCreated }: { systems: SystemInfo[]; season: number; onCreated: (id: number, name: string) => void }) {
   const [name, setName] = useState("");
   const [systemId, setSystemId] = useState(systems[0]?.id ?? "");
   const system = systems.find((s) => s.id === systemId);
@@ -711,10 +799,10 @@ function NewCompetition({ systems, season, onCreated }: { systems: SystemInfo[];
         onSubmit={(e) => {
           e.preventDefault();
           void create.run(async () => {
-            await post("/api/admin/competitions", { name, system: systemId, params, visibility, raceSelection, season });
+            const created = await post<{ id: number }>("/api/admin/competitions", { name, system: systemId, params, visibility, raceSelection, season });
             setName("");
-            onCreated();
-          }, "Created. Drafts were made for every race with stored results. Review and publish them.");
+            onCreated(created.id, name);
+          }, "Created – calculating it for every race with results (see the panel at the top).");
         }}
       >
         <label className="block">
@@ -731,12 +819,7 @@ function NewCompetition({ systems, season, onCreated }: { systems: SystemInfo[];
             ))}
           </select>
         </label>
-        {system?.fields.map((f) => (
-          <label key={f.key} className="block">
-            {f.label}
-            <input className="input mt-1" type="number" min={f.min} max={f.max} value={String(params[f.key] ?? "")} onChange={(e) => setParams({ ...params, [f.key]: Number(e.target.value) })} />
-          </label>
-        ))}
+        {system?.fields.map((f) => <ParamInput key={f.key} f={f} params={params} setParams={setParams} />)}
         <label className="block">
           Who can see it
           <select className="input mt-1" value={visibility} onChange={(e) => setVisibility(e.target.value as "members" | "admin")}>
@@ -769,17 +852,51 @@ function NewCompetition({ systems, season, onCreated }: { systems: SystemInfo[];
 function SettingsPage({ season, passwordSet }: { season: number; passwordSet: boolean }) {
   const comps = useApi<{ competitions: AdminCompetition[]; systems: SystemInfo[] }>("/api/admin/competitions");
   const races = useApi<RaceSummary[]>(`/api/admin/races?season=${season}`);
+  const { running, runBulk, panel } = useBulk();
+  const [publishReady, setPublishReady] = useState(false);
+
+  /** After a scoring change: re-score that competition race by race, then offer Publish all. */
+  async function recalculate(competitionId: number, name: string) {
+    await comps.reload();
+    const list = (races.data ?? []).filter((r) => r.calculated);
+    setPublishReady(false);
+    await runBulk(`Recalculating ${name}`, list, (r) => recalcStep(r, competitionId));
+    setPublishReady(true);
+  }
+  async function publishAll() {
+    const fresh = await get<RaceSummary[]>(`/api/admin/races?season=${season}`);
+    setPublishReady(false);
+    await runBulk("Publish all", fresh.filter((r) => r.draftWaiting), publishStep);
+    await races.reload();
+  }
   const [pw, setPw] = useState("");
   const pwAction = useAction();
   if (!comps.data) return <Loading />;
   return (
     <>
       <PageTitle title="Settings" />
+      {panel}
+      {publishReady && !running && (
+        <div className="mb-4 flex flex-wrap items-center gap-3">
+          <button className="btn btn-primary" onClick={publishAll}>
+            Publish all
+          </button>
+          <span className="text-sm text-muted">or review the drafts on each race page first.</span>
+        </div>
+      )}
       <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted">Competitions</h2>
       {comps.data.competitions.map((c) => (
-        <CompetitionEditor key={`${c.id}-${c.name}-${JSON.stringify(c.params)}-${c.racesCounted}-${c.bestX}`} comp={c} systems={comps.data!.systems} races={races.data ?? []} season={season} onSaved={() => comps.reload()} />
+        <CompetitionEditor
+          key={`${c.id}-${c.name}-${JSON.stringify(c.params)}-${c.racesCounted}-${c.bestX}-${c.visibility}-${c.raceSelection}`}
+          comp={c}
+          systems={comps.data!.systems}
+          races={races.data ?? []}
+          season={season}
+          onSaved={() => comps.reload()}
+          onRecalculate={(id, name) => void recalculate(id, name)}
+        />
       ))}
-      <NewCompetition systems={comps.data.systems} season={season} onCreated={() => comps.reload()} />
+      <NewCompetition systems={comps.data.systems} season={season} onCreated={(id, name) => void recalculate(id, name)} />
       <p className="mt-2 mb-6 text-xs text-muted">Tie rules: no shared places for birds (Benzing's order decides exact ties); fanciers on equal season totals share a place.</p>
 
       <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted">Members</h2>

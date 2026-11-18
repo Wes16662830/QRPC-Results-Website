@@ -50,6 +50,8 @@ export interface ScoringSystem<P extends Record<string, unknown> = Record<string
   raceFields?: ParamField[];
   /** Validates per-race settings; throws RangeError with a readable message. */
   parseRace?(raw: unknown): Record<string, unknown>;
+  /** Competition-wide default for the per-race settings, if the admin set one. */
+  raceDefaults?(params: P): Record<string, unknown> | null;
   /** Throws MissingRaceSettings when raceFields exist but raceParams is null. */
   score(
     arrivals: readonly ArrivalInput[],
@@ -86,29 +88,43 @@ export const topNPerFancier: ScoringSystem<{ scoringBirds: number }> = {
   score: (arrivals, p, overrides) => calculateRace(arrivals, { scoringBirds: p.scoringBirds }, overrides),
 };
 
-/** Weighted by basketing: birds within the race's closing time score N − position + 1; total ÷ birds basketed. */
-export const weightedByBasketing: ScoringSystem<Record<string, never>> = {
+/** Weighted by basketing: birds within the closing time score N − position + 1; total ÷ birds basketed. */
+const closingFields: ParamField[] = [
+  { key: "closingDay", label: "Closing day", type: "integer", min: 1, max: 14, help: "1 = liberation day, 2 = the next day" },
+  { key: "closingTime", label: "Closing time (SAST)", type: "time" },
+];
+
+/** Default closing (competition-wide): both fields, or neither. */
+function parseDefaultClosing(raw: unknown): { closingDay?: number; closingTime?: string } {
+  const r = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
+  const empty = (v: unknown) => v === undefined || v === null || v === "";
+  if (empty(r.closingDay) && empty(r.closingTime)) return {};
+  if (empty(r.closingDay) || empty(r.closingTime)) throw new RangeError("Set both the default closing day and time, or leave both empty.");
+  const c = parseClosing(r);
+  return { closingDay: c.day, closingTime: c.time.slice(0, 5) };
+}
+
+export const weightedByBasketing: ScoringSystem<{ closingDay?: number; closingTime?: string }> = {
   id: "weighted-by-basketing",
   name: "Weighted by birds basketed (closing time)",
   entity: "fancier",
   season: "sum",
   unit: "Points",
-  fields: [],
+  fields: closingFields.map((f) => ({ ...f, label: `Default ${f.label.charAt(0).toLowerCase()}${f.label.slice(1)}`, help: `${f.help ? `${f.help}. ` : ""}Used for every race unless the race has its own.` })),
   defaults: {},
-  raceFields: [
-    { key: "closingDay", label: "Closing day", type: "integer", min: 1, max: 14, help: "1 = liberation day, 2 = the next day" },
-    { key: "closingTime", label: "Closing time (SAST)", type: "time" },
-  ],
+  raceFields: closingFields,
   describe: () =>
     "Every bird clocked by the race's closing time scores. Those birds are ranked by speed; with N of them the fastest gets N points and the slowest 1. A fancier's race score is their total points divided by the number of birds they basketed.",
-  parse: () => ({}),
+  parse: parseDefaultClosing,
   parseRace(raw) {
     const c = parseClosing(raw);
     return { closingDay: c.day, closingTime: c.time.slice(0, 5) };
   },
-  score(arrivals, _p, overrides, raceParams) {
-    if (!raceParams) throw new MissingRaceSettings("Set this race's closing day and time for this competition.");
-    return calculateWeightedRace(arrivals, parseClosing(raceParams), overrides);
+  raceDefaults: (p) => (p.closingDay !== undefined ? { closingDay: p.closingDay, closingTime: p.closingTime } : null),
+  score(arrivals, p, overrides, raceParams) {
+    const closing = raceParams ?? (p.closingDay !== undefined ? p : null);
+    if (!closing) throw new MissingRaceSettings("Set a default closing time for this competition in Settings, or one for this race.");
+    return calculateWeightedRace(arrivals, parseClosing(closing), overrides);
   },
 };
 

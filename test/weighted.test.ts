@@ -91,6 +91,19 @@ describe("weighted by basketing", () => {
     expect(weightedByBasketing.describe({})).toMatch(/divided by the number of birds they basketed/);
   });
 
+  it("competition default closing: both or neither; race settings win over the default", () => {
+    const w = weightedByBasketing;
+    expect(w.parse(null)).toEqual({});
+    expect(w.parse({ closingDay: "", closingTime: "" })).toEqual({});
+    expect(w.parse({ closingDay: "2", closingTime: "07:15" })).toEqual({ closingDay: 2, closingTime: "07:15" });
+    expect(() => w.parse({ closingTime: "07:15" })).toThrow(/both/);
+    expect(w.raceDefaults!({})).toBeNull();
+    expect(w.raceDefaults!({ closingDay: 1, closingTime: "18:00" })).toEqual({ closingDay: 1, closingTime: "18:00" });
+    const birds = [bird("A", 300, 1, "15:00:00", 1), bird("B", 200, 1, "17:00:00", 1)];
+    expect(w.score(birds, { closingDay: 1, closingTime: "16:00" }, [], null).n).toBe(1); // default used
+    expect(w.score(birds, { closingDay: 1, closingTime: "16:00" }, [], { closingDay: 1, closingTime: "18:00" }).n).toBe(2); // race wins
+  });
+
   it("Mooi River 2026, closing day 1 at 16:00", () => {
     const page = parseResultPage(readFileSync(new URL("../fixtures/benzing/r-6975-t-17084-mooiriver.html", import.meta.url), "utf8"));
     const r = calculateWeightedRace(

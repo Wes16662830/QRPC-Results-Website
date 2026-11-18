@@ -258,8 +258,8 @@ async function adminRoutes(
   let c = m(/^\/api\/admin\/competitions\/(\d+)$/);
   if (c && post) {
     const b = await body<{ name?: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null; active?: boolean; displayOrder?: number; visibility?: "members" | "admin"; raceSelection?: "all" | "picked"; season?: number }>(request);
-    const drafts = await updateCompetition(ctx, Number(c[1]), b, actor, Number(b.season) || (await seasonParam()));
-    return json({ ok: true, newDrafts: drafts.filter((d) => d.changed).length });
+    const res = await updateCompetition(ctx, Number(c[1]), b, actor, Number(b.season) || (await seasonParam()));
+    return json({ ok: true, ...res });
   }
   c = m(/^\/api\/admin\/competitions\/(\d+)\/races\/(\d+)\/params$/);
   if (c && post) return json(await setCompetitionRaceParams(ctx, Number(c[1]), Number(c[2]), await body(request), actor));
@@ -303,7 +303,10 @@ async function adminRoutes(
   if (r && post) {
     const raceId = Number(r[1]);
     if (r[2] === "calculate") return json(await calculateResults(ctx, raceId, actor));
-    if (r[2] === "recalculate") return json(await recalculateRace(ctx, raceId, actor));
+    if (r[2] === "recalculate") {
+      const b = await body<{ competitionId?: number }>(request);
+      return json(await recalculateRace(ctx, raceId, actor, b.competitionId ? Number(b.competitionId) : undefined));
+    }
     if (r[2] === "publish") {
       const b = await body<{ acknowledgeWarnings?: boolean }>(request);
       await publish(ctx, raceId, actor, Boolean(b.acknowledgeWarnings));

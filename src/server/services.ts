@@ -312,15 +312,14 @@ async function fancierIdsByName(db: D1Database): Promise<Map<string, number>> {
 }
 
 /** Runs a competition's scoring system on stored arrivals. Fancier key = our fancier id (as text). */
-export async function scoreSnapshot(
-  db: D1Database,
+export function scoreArrivals(
+  ids: Map<string, number>,
   arrivals: readonly StoredArrival[],
   comp: Pick<CompetitionRow, "system" | "params_json">,
   overrides: readonly Override[],
   raceParams: Record<string, unknown> | null = null,
   raceBasketed: number | null = null,
 ) {
-  const ids = await fancierIdsByName(db);
   const system = getSystem(comp.system);
   return system.score(
     arrivals.map((a) => ({
@@ -341,64 +340,102 @@ export async function scoreSnapshot(
   );
 }
 
-/** Creates a new draft for one competition from the latest sheet snapshot, unless nothing changed. */
+export async function scoreSnapshot(
+  db: D1Database,
+  arrivals: readonly StoredArrival[],
+  comp: Pick<CompetitionRow, "system" | "params_json">,
+  overrides: readonly Override[],
+  raceParams: Record<string, unknown> | null = null,
+  raceBasketed: number | null = null,
+) {
+  return scoreArrivals(await fancierIdsByName(db), arrivals, comp, overrides, raceParams, raceBasketed);
+}
+
 type DraftResult = { competitionId: number; calcId: number | null; changed: boolean; skipped?: string };
 
-async function createDraft(db: D1Database, race: RaceRow, comp: CompetitionRow, actor: string, now: Date, warnings: string[]): Promise<DraftResult> {
+/**
+ * Creates drafts for every active competition (or just one) from the latest sheet snapshot, skipping
+ * competitions whose inputs are unchanged. Shared data is loaded once and each changed competition is
+ * written in a single batch, so a race costs about 8 + 1 per changed competition D1 queries
+ * (the free plan allows 50 per request).
+ */
+async function createDrafts(db: D1Database, race: RaceRow, actor: string, now: Date, warnings: string[], only?: number): Promise<DraftResult[]> {
+  const comps = (await competitions(db, { activeOnly: true })).filter((c) => only === undefined || c.id === only);
+  if (comps.length === 0) return [];
   const snap = await latestSnapshot(db, race.id, "sheet");
   if (!snap) throw new UserError("No result sheet stored for this race yet. Press Calculate results first.");
   const overrides = await activeOverrides(db, race.id);
   const engineOverrides = overrides.map(({ scope, target, reason }) => ({ scope, target, reason }));
   const arrivals = JSON.parse(snap.arrivals_json) as StoredArrival[];
-  if (comp.race_selection === "picked" && !(await competitionUsesRace(db, comp, race.id))) {
-    return { competitionId: comp.id, calcId: null, changed: false, skipped: `Not one of the races picked for ${comp.name}.` };
-  }
-  const raceParams = (await raceParamsFor(db, race.id)).get(comp.id) ?? null;
-  let calc;
-  try {
-    calc = await scoreSnapshot(db, arrivals, comp, engineOverrides, raceParams, race.basketed_total);
-  } catch (e) {
-    // e.g. the weighted competition has no closing time for this race yet: nothing is guessed.
-    if (e instanceof MissingRaceSettings) return { competitionId: comp.id, calcId: null, changed: false, skipped: e.message };
-    throw e;
-  }
-  const inputsHash = await sha256(
-    JSON.stringify({ snapshot: snap.content_sha256, system: comp.system, params: comp.params_json, raceParams, raceBasketed: race.basketed_total, overrides: engineOverrides }),
-  );
+  const raceParams = await raceParamsFor(db, race.id);
+  const ids = await fancierIdsByName(db);
+  const picks = await db
+    .prepare("SELECT competition_id FROM competition_inclusion WHERE race_id = ?")
+    .bind(race.id)
+    .all<{ competition_id: number }>();
+  const picked = new Set(picks.results.map((r) => r.competition_id));
+  const latestRows = await db
+    .prepare("SELECT competition_id, id, inputs_sha256 FROM race_calc WHERE race_id = ? AND status IN ('draft','published') ORDER BY id DESC")
+    .bind(race.id)
+    .all<{ competition_id: number; id: number; inputs_sha256: string }>();
+  const latest = new Map<number, { id: number; inputs_sha256: string }>();
+  for (const r of latestRows.results) if (!latest.has(r.competition_id)) latest.set(r.competition_id, r);
 
-  const latest = await db
-    .prepare("SELECT id, inputs_sha256 FROM race_calc WHERE race_id = ? AND competition_id = ? AND status IN ('draft','published') ORDER BY id DESC LIMIT 1")
-    .bind(race.id, comp.id)
-    .first<{ id: number; inputs_sha256: string }>();
-  if (latest && latest.inputs_sha256 === inputsHash && warnings.length === 0) return { competitionId: comp.id, calcId: latest.id, changed: false };
-
-  await db.prepare("UPDATE race_calc SET status = 'superseded' WHERE race_id = ? AND competition_id = ? AND status = 'draft'").bind(race.id, comp.id).run();
-  const stored: StoredCalcResult = { ...calc, warnings };
-  const res = await db
-    .prepare(
-      `INSERT INTO race_calc (race_id, competition_id, competition_version_id, snapshot_id, overrides_json, result_json, inputs_sha256, status, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)`,
-    )
-    .bind(race.id, comp.id, comp.version_id, snap.id, JSON.stringify(overrides), JSON.stringify(stored), inputsHash, iso(now), actor)
-    .run();
-  const calcId = res.meta.last_row_id!;
-  const stmts = calc.fanciers
-    .filter((f) => /^\d+$/.test(f.fancierKey))
-    .map((f) =>
-      db
-        .prepare("INSERT INTO race_calc_score (race_calc_id, fancier_id, birds_scored, score, points, basketed) VALUES (?, ?, ?, ?, ?, ?)")
-        .bind(calcId, Number(f.fancierKey), f.birdsScored, f.score, f.points ?? null, f.basketed ?? null),
-    );
-  if (stmts.length) await db.batch(stmts);
-  await audit(db, now, actor, "draft-created", "race", race.id, { calcId, competition: comp.slug, n: calc.n, competitionVersion: comp.version_id, overrides: overrides.length, warnings });
-  return { competitionId: comp.id, calcId, changed: true };
-}
-
-/** Drafts for every active competition (or just one). */
-async function createDrafts(db: D1Database, race: RaceRow, actor: string, now: Date, warnings: string[], only?: number) {
   const out: DraftResult[] = [];
-  for (const comp of await competitions(db, { activeOnly: true })) {
-    if (only === undefined || comp.id === only) out.push(await createDraft(db, race, comp, actor, now, warnings));
+  let wrote = false;
+  for (const comp of comps) {
+    if (comp.race_selection === "picked" && !picked.has(comp.id)) {
+      out.push({ competitionId: comp.id, calcId: null, changed: false, skipped: `Not one of the races picked for ${comp.name}.` });
+      continue;
+    }
+    const rp = raceParams.get(comp.id) ?? null;
+    let calc;
+    try {
+      calc = scoreArrivals(ids, arrivals, comp, engineOverrides, rp, race.basketed_total);
+    } catch (e) {
+      // e.g. the weighted competition has no closing time for this race: nothing is guessed.
+      if (e instanceof MissingRaceSettings) {
+        out.push({ competitionId: comp.id, calcId: null, changed: false, skipped: e.message });
+        continue;
+      }
+      throw e;
+    }
+    const inputsHash = await sha256(
+      JSON.stringify({ snapshot: snap.content_sha256, system: comp.system, params: comp.params_json, raceParams: rp, raceBasketed: race.basketed_total, overrides: engineOverrides }),
+    );
+    const prev = latest.get(comp.id);
+    if (prev && prev.inputs_sha256 === inputsHash && warnings.length === 0) {
+      out.push({ competitionId: comp.id, calcId: prev.id, changed: false });
+      continue;
+    }
+    const stored: StoredCalcResult = { ...calc, warnings };
+    // The new calc's id is read back inside the same batch (D1 batches run in order, as one transaction).
+    const newId = "(SELECT MAX(id) FROM race_calc WHERE race_id = ? AND competition_id = ?)";
+    await db.batch([
+      db.prepare("UPDATE race_calc SET status = 'superseded' WHERE race_id = ? AND competition_id = ? AND status = 'draft'").bind(race.id, comp.id),
+      db
+        .prepare(
+          `INSERT INTO race_calc (race_id, competition_id, competition_version_id, snapshot_id, overrides_json, result_json, inputs_sha256, status, created_at, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)`,
+        )
+        .bind(race.id, comp.id, comp.version_id, snap.id, JSON.stringify(overrides), JSON.stringify(stored), inputsHash, iso(now), actor),
+      ...calc.fanciers
+        .filter((f) => /^\d+$/.test(f.fancierKey))
+        .map((f) =>
+          db
+            .prepare(`INSERT INTO race_calc_score (race_calc_id, fancier_id, birds_scored, score, points, basketed) VALUES (${newId}, ?, ?, ?, ?, ?)`)
+            .bind(race.id, comp.id, Number(f.fancierKey), f.birdsScored, f.score, f.points ?? null, f.basketed ?? null),
+        ),
+      db
+        .prepare("INSERT INTO audit_log (at, actor, action, entity, entity_id, detail_json) VALUES (?, ?, 'draft-created', 'race', ?, ?)")
+        .bind(iso(now), actor, String(race.id), JSON.stringify({ competition: comp.slug, n: calc.n, competitionVersion: comp.version_id, overrides: overrides.length, warnings })),
+    ]);
+    wrote = true;
+    out.push({ competitionId: comp.id, calcId: null, changed: true });
+  }
+  if (wrote) {
+    const drafts = await db.prepare("SELECT competition_id, id FROM race_calc WHERE race_id = ? AND status = 'draft'").bind(race.id).all<{ competition_id: number; id: number }>();
+    for (const d of out) if (d.changed) d.calcId = drafts.results.find((x) => x.competition_id === d.competitionId)?.id ?? null;
   }
   return out;
 }
@@ -631,10 +668,10 @@ export async function updateCompetition(ctx: Ctx, competitionId: number, input: 
     after: { name, params: paramsJson, racesCounted, bestX, active, visibility, raceSelection },
   });
   // Scoring changes alter race results: create fresh drafts for the admin to review and publish.
-  if (paramsJson !== before.params_json || (active && !before.active) || raceSelection !== before.race_selection) {
-    return recalculateSeason(ctx, season, actor, competitionId);
-  }
-  return [];
+  // Scoring changes alter race results. The admin page then recalculates race by race (one request each,
+  // to stay inside the free plan's per-request limits) and the admin reviews and publishes the drafts.
+  void season;
+  return { recalculate: paramsJson !== before.params_json || (active === 1 && before.active !== 1) || raceSelection !== before.race_selection };
 }
 
 export async function createCompetition(
@@ -679,33 +716,47 @@ export async function createCompetition(
     .bind(id, JSON.stringify(params), racesCounted, bestX, iso(now), actor)
     .run();
   await audit(ctx.db, now, actor, "competition-create", "competition", id, { name, system: system.id, params, racesCounted, bestX });
-  await recalculateSeason(ctx, season, actor, id);
-  return { id, slug };
+  void season;
+  return { id, slug, recalculate: true };
 }
 
-/** Sets a competition's per-race settings (e.g. closing time) and re-scores that race as a new draft. */
+/**
+ * Sets a competition's per-race settings (e.g. closing time) and re-scores that race as a new draft.
+ * An override equal to the competition's default is not stored: the race simply follows the default.
+ * `{ clear: true }` removes the override.
+ */
 export async function setCompetitionRaceParams(ctx: Ctx, competitionId: number, raceId: number, raw: unknown, actor: string) {
   const comp = await competition(ctx.db, competitionId);
   await getRace(ctx.db, raceId);
   const system = getSystem(comp.system);
   if (!system.parseRace) throw new UserError(`${comp.name} has no per-race settings.`);
-  let params: Record<string, unknown>;
-  try {
-    params = system.parseRace(raw);
-  } catch (e) {
-    throw new UserError((e as Error).message);
+  const clear = typeof raw === "object" && raw !== null && (raw as Record<string, unknown>).clear === true;
+  let params: Record<string, unknown> | null = null;
+  if (!clear) {
+    try {
+      params = system.parseRace(raw);
+    } catch (e) {
+      throw new UserError((e as Error).message);
+    }
   }
+  const defaults = system.raceDefaults?.(system.parse(JSON.parse(comp.params_json))) ?? null;
+  const sameAsDefault = params !== null && defaults !== null && JSON.stringify(params) === JSON.stringify(defaults);
   const before = (await raceParamsFor(ctx.db, raceId)).get(competitionId) ?? null;
-  await ctx.db
-    .prepare(
-      `INSERT INTO competition_race_param (competition_id, race_id, params_json, updated_at, actor) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(competition_id, race_id) DO UPDATE SET params_json = excluded.params_json, updated_at = excluded.updated_at, actor = excluded.actor`,
-    )
-    .bind(competitionId, raceId, JSON.stringify(params), iso(ctx.now()), actor)
-    .run();
-  await audit(ctx.db, ctx.now(), actor, "competition-race-params", "race", raceId, { competition: comp.slug, before, after: params });
-  const hasSheet = await latestSnapshot(ctx.db, raceId, "sheet");
-  return hasSheet ? recalculateRace(ctx, raceId, actor, competitionId) : { drafts: [], changed: false };
+  if (params === null || sameAsDefault) {
+    await ctx.db.prepare("DELETE FROM competition_race_param WHERE competition_id = ? AND race_id = ?").bind(competitionId, raceId).run();
+  } else {
+    await ctx.db
+      .prepare(
+        `INSERT INTO competition_race_param (competition_id, race_id, params_json, updated_at, actor) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(competition_id, race_id) DO UPDATE SET params_json = excluded.params_json, updated_at = excluded.updated_at, actor = excluded.actor`,
+      )
+      .bind(competitionId, raceId, JSON.stringify(params), iso(ctx.now()), actor)
+      .run();
+  }
+  const stored = params === null || sameAsDefault ? null : params;
+  await audit(ctx.db, ctx.now(), actor, "competition-race-params", "race", raceId, { competition: comp.slug, before, after: stored, usesDefault: stored === null });
+  const result = (await latestSnapshot(ctx.db, raceId, "sheet")) ? await recalculateRace(ctx, raceId, actor, competitionId) : { drafts: [], changed: false };
+  return { ...result, usesDefault: stored === null, sameAsDefault };
 }
 
 /** Includes or leaves out a race for one competition. Picking a race scores it as a new draft. */

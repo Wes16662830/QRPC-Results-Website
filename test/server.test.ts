@@ -5,7 +5,7 @@ import type { Env } from "../src/server/env";
 import { adminRaceDetail, championship, live, raceDetail } from "../src/server/queries";
 import {
   addOverride, calculateResults, crossCheck, isLiveActive, pollLive, publish, recalculateRace,
-  revokeOverride, sastToUtc, syncRaces, updateCompetition, createCompetition, setCompetitionRace, setCompetitionRaceParams, updateRace, type Ctx, type StoredArrival,
+  recalculateSeason, revokeOverride, sastToUtc, syncRaces, updateCompetition, createCompetition, setCompetitionRace, setCompetitionRaceParams, updateRace, type Ctx, type StoredArrival,
 } from "../src/server/services";
 import { testDb } from "./helpers/d1";
 import { fakeBenzing } from "./helpers/fakeBenzing";
@@ -180,8 +180,10 @@ describe("competitions (multiple result systems)", () => {
     const { db, ctx } = setup();
     const raceId = await mooiRiverId(ctx);
     await calculateResults(ctx, raceId, ADMIN);
-    const { slug } = await createCompetition(ctx, { name: "3-bird", system: "top-n-per-fancier", params: { scoringBirds: 3 } }, ADMIN, 2026);
-    expect(slug).toBe("3-bird");
+    const created = await createCompetition(ctx, { name: "3-bird", system: "top-n-per-fancier", params: { scoringBirds: 3 } }, ADMIN, 2026);
+    expect(created).toMatchObject({ slug: "3-bird", recalculate: true });
+    // The admin page then recalculates race by race.
+    await recalculateRace(ctx, raceId, ADMIN, created.id);
     await expect(createCompetition(ctx, { name: "3-bird", system: "top-n-per-fancier" }, ADMIN, 2026)).rejects.toThrow(/already exists/);
     await expect(createCompetition(ctx, { name: "X", system: "nope" }, ADMIN, 2026)).rejects.toThrow(/Unknown scoring system/);
 
@@ -218,7 +220,7 @@ describe("competitions (multiple result systems)", () => {
     const calc = await calculateResults(ctx, raceId, ADMIN);
     const weighted = await db.prepare("SELECT id FROM competition WHERE slug = 'weighted'").first<{ id: number }>();
     const wId = weighted!.id;
-    expect(calc.drafts.find((d) => d.competitionId === wId)).toMatchObject({ changed: false, skipped: expect.stringMatching(/closing day and time/) });
+    expect(calc.drafts.find((d) => d.competitionId === wId)).toMatchObject({ changed: false, skipped: expect.stringMatching(/default closing time/) });
 
     await expect(setCompetitionRaceParams(ctx, wId, raceId, { closingDay: 1, closingTime: "25:00" }, ADMIN)).rejects.toThrow(/HH:MM/);
     await expect(setCompetitionRaceParams(ctx, 1, raceId, { closingDay: 1, closingTime: "16:00" }, ADMIN)).rejects.toThrow(/no per-race settings/);
@@ -245,6 +247,40 @@ describe("competitions (multiple result systems)", () => {
     await updateCompetition(ctx, wId, { visibility: "members" }, ADMIN, 2026);
     expect((await raceDetail(db, raceId, NOW)).results.map((r) => r.competition.slug)).toEqual(["five-bird", "best-bird", "wins", "top-25", "weighted"]);
     await expect(updateCompetition(ctx, wId, { visibility: "x" as never }, ADMIN, 2026)).rejects.toThrow(/Visibility/);
+  });
+
+  it("weighted default closing time, with per-race overrides kept only when different", async () => {
+    const { db, ctx } = setup();
+    const raceId = await mooiRiverId(ctx);
+    await calculateResults(ctx, raceId, ADMIN);
+    const wId = (await db.prepare("SELECT id FROM competition WHERE slug = 'weighted'").first<{ id: number }>())!.id;
+    const draftN = async () => draftOf(await adminRaceDetail(db, raceId, NOW), "weighted")?.n;
+    const stored = async () => (await db.prepare("SELECT params_json FROM competition_race_param WHERE competition_id = ? AND race_id = ?").bind(wId, raceId).first<{ params_json: string }>())?.params_json ?? null;
+
+    await expect(updateCompetition(ctx, wId, { params: { closingDay: 1 } }, ADMIN, 2026)).rejects.toThrow(/both/);
+    expect(await updateCompetition(ctx, wId, { params: { closingDay: 1, closingTime: "16:00" } }, ADMIN, 2026)).toEqual({ recalculate: true });
+    await recalculateRace(ctx, raceId, ADMIN, wId);
+    expect(await draftN()).toBe(197); // default: day 1, 16:00
+
+    // Override that differs is stored and used…
+    const diff = await setCompetitionRaceParams(ctx, wId, raceId, { closingDay: 1, closingTime: "18:00" }, ADMIN);
+    expect(diff).toMatchObject({ usesDefault: false, sameAsDefault: false, changed: true });
+    expect(await stored()).toBe('{"closingDay":1,"closingTime":"18:00"}');
+    expect(await draftN()).toBe(242);
+    // …one equal to the default is not stored: the race follows the default again.
+    const same = await setCompetitionRaceParams(ctx, wId, raceId, { closingDay: "1", closingTime: "16:00" }, ADMIN);
+    expect(same).toMatchObject({ usesDefault: true, sameAsDefault: true });
+    expect(await stored()).toBeNull();
+    expect(await draftN()).toBe(197);
+    // Clearing works too, and changing the default then moves every race that follows it.
+    await setCompetitionRaceParams(ctx, wId, raceId, { closingDay: 2, closingTime: "08:00" }, ADMIN);
+    expect((await setCompetitionRaceParams(ctx, wId, raceId, { clear: true }, ADMIN)).usesDefault).toBe(true);
+    await updateCompetition(ctx, wId, { params: { closingDay: 1, closingTime: "18:00" } }, ADMIN, 2026);
+    await recalculateRace(ctx, raceId, ADMIN, wId);
+    expect(await draftN()).toBe(242);
+    // Removing the default leaves the race unscored unless it has its own closing.
+    await updateCompetition(ctx, wId, { params: {} }, ADMIN, 2026);
+    expect((await recalculateRace(ctx, raceId, ADMIN, wId)).drafts[0]).toMatchObject({ skipped: expect.stringMatching(/default closing time/) });
   });
 
   it("best bird, distance bands, wins and top 25 %: standings by bird, by count and by season ratio", async () => {
@@ -280,7 +316,8 @@ describe("competitions (multiple result systems)", () => {
     expect((await championship(db, "best-short-bird", 2026)).standings).toEqual([]);
 
     // Bird and ratio settings are editable like any other competition.
-    await updateCompetition(ctx, top.competition.id, { params: { percent: 50 } }, ADMIN, 2026);
+    expect(await updateCompetition(ctx, top.competition.id, { params: { percent: 50 } }, ADMIN, 2026)).toEqual({ recalculate: true });
+    await recalculateRace(ctx, raceId, ADMIN, top.competition.id);
     await publish(ctx, raceId, ADMIN, false);
     expect((await championship(db, "top-25", 2026)).standings[0]!.total).toBeGreaterThan(36.14);
     await expect(updateCompetition(ctx, top.competition.id, { raceSelection: "x" as never }, ADMIN, 2026)).rejects.toThrow(/Race selection/);
@@ -292,8 +329,9 @@ describe("competitions (multiple result systems)", () => {
     const first = await calculateResults(ctx, raceId, ADMIN);
     await publish(ctx, raceId, ADMIN, false);
     expect((await recalculateRace(ctx, raceId, ADMIN)).changed).toBe(false);
-    const drafts = await updateCompetition(ctx, 1, { params: { scoringBirds: 3 } }, ADMIN, 2026);
-    expect(drafts).toEqual([{ raceId, changed: true }]);
+    expect(await updateCompetition(ctx, 1, { params: { scoringBirds: 3 } }, ADMIN, 2026)).toEqual({ recalculate: true });
+    expect(await updateCompetition(ctx, 1, { name: "5-bird championship" }, ADMIN, 2026)).toEqual({ recalculate: false });
+    expect(await recalculateSeason(ctx, 2026, ADMIN, 1)).toEqual([{ raceId, changed: true }]);
     const draft = draftOf(await adminRaceDetail(db, raceId, NOW))!;
     expect(draft.fanciers.every((f) => f.birdsScored <= 3)).toBe(true);
     await expect(updateCompetition(ctx, 1, { params: { scoringBirds: 0 } }, ADMIN, 2026)).rejects.toThrow(/1 to 50/);
