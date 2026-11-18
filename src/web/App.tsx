@@ -11,6 +11,7 @@ import { LivePage } from "./pages/Live";
 import { ChampionshipPage } from "./pages/Championship";
 import { FancierPage } from "./pages/Fancier";
 import { RulesPage } from "./pages/Rules";
+import { LeaderboardPage } from "./pages/Leaderboard";
 import { LoginPage } from "./pages/Login";
 import { AdminApp } from "./admin/Admin";
 
@@ -122,6 +123,7 @@ export function App() {
           <Route path="/championship" element={<ChampionshipPage />} />
           <Route path="/fanciers/:id" element={<FancierPage />} />
           <Route path="/rules" element={<RulesPage />} />
+          <Route path="/leaderboard" element={<LeaderboardPage />} />
           <Route path="/admin/*" element={<AdminApp />} />
           <Route path="*" element={<p className="text-muted">Page not found.</p>} />
         </Routes>

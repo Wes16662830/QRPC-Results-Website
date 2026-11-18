@@ -123,7 +123,17 @@ export function ChampionshipPage({ admin = false }: { admin?: boolean }) {
   const q = `season=${data.season}&competition=${c.slug}`;
   return (
     <>
-      <PageTitle title={`${data.season} ${c.name}`} sub={`${data.races.length} published races · ${counted}`} />
+      <PageTitle
+        title={`${data.season} ${c.name}`}
+        sub={`${data.races.length} published races · ${counted}`}
+        actions={
+          !admin && data.races.length > 0 ? (
+            <Link className="btn btn-primary" to="/leaderboard">
+              Weekly leaderboard
+            </Link>
+          ) : undefined
+        }
+      />
       <CompetitionPicker value={c.slug} onChange={(s) => setParams({ competition: s })} source={admin ? "/api/admin/competitions" : undefined} />
       {c.visibility === "admin" && <div className="mb-4"><Notice>Admin only: members can't see this competition. Switch it on in Settings when you're happy with it.</Notice></div>}
       {data.standings.length === 0 ? (

@@ -252,7 +252,12 @@ export async function adminRaceDetail(db: D1Database, raceId: number, now: Date)
 }
 
 /** Season standings for one competition, from PUBLISHED race results only. */
-export async function championship(db: D1Database, competitionRef: number | string | null, season: number, opts: { admin?: boolean } = {}) {
+export async function championship(
+  db: D1Database,
+  competitionRef: number | string | null,
+  season: number,
+  opts: { admin?: boolean; upTo?: { date: string; number: number | null } } = {},
+) {
   const comp =
     competitionRef === null ? (await competitions(db, { activeOnly: true, membersOnly: !opts.admin }))[0]! : await loadCompetition(db, competitionRef);
   if (!opts.admin && comp.visibility !== "members") throw new UserError("Competition not found", 404);
@@ -269,7 +274,10 @@ export async function championship(db: D1Database, competitionRef: number | stri
       )
       .bind(comp.id, CLUB_ID, season)
       .all<{ id: number; name: string; race_date: string; race_number: number | null; calc_id: number }>()
-  ).results.filter((r) => (picked ? picked.has(r.id) : !excluded.has(r.id)));
+  ).results
+    .filter((r) => (picked ? picked.has(r.id) : !excluded.has(r.id)))
+    // "As of" a race (weekly leaderboard): only races up to and including it.
+    .filter((r) => !opts.upTo || r.race_date < opts.upTo.date || (r.race_date === opts.upTo.date && (r.race_number ?? 0) <= (opts.upTo.number ?? 0)));
   const names = await fancierNames(db);
   const racesCounted = comp.races_counted === "all" ? ("all" as const) : { best: comp.best_x ?? races.length };
   const base = {
@@ -487,6 +495,82 @@ export async function home(db: D1Database, now: Date, seasonParam?: number) {
     racesCounted: champ.races.length,
     nextRace: next ? raceSummary(next, isLiveActive(next, now) ? "live" : "upcoming") : null,
     liveRaces: liveNow.races.map((r) => ({ id: r.race.id, name: r.race.name, arrivals: r.arrivals.length })),
+  };
+}
+
+/**
+ * Weekly leaderboard: standings of the club championship and the best-bird competition as of one race
+ * (default: the latest published race of the season), with movement since the previous week.
+ */
+export async function leaderboard(
+  db: D1Database,
+  season: number,
+  opts: { raceId?: number; club?: string | null; bird?: string | null } = {},
+) {
+  const comps = await competitions(db, { activeOnly: true, membersOnly: true });
+  const clubComp = (opts.club ? comps.find((c) => c.slug === opts.club) : null) ?? comps.find((c) => getSystem(c.system).entity === "fancier") ?? null;
+  const birdComp = (opts.bird ? comps.find((c) => c.slug === opts.bird) : null) ?? comps.find((c) => c.slug === "best-bird") ?? comps.find((c) => getSystem(c.system).entity === "bird") ?? null;
+  if (!clubComp) throw new UserError("No club championship to show.", 404);
+
+  // Weeks = races of the season with a published club-championship result.
+  const weeks = (
+    await db
+      .prepare(
+        `SELECT r.id, r.name, r.race_date, r.race_number, r.basketed_total FROM race r
+         WHERE r.club_id = ? AND r.season = ? AND r.kind = 'race' AND r.included = 1
+           AND EXISTS (SELECT 1 FROM race_calc c WHERE c.race_id = r.id AND c.competition_id = ? AND c.status = 'published')
+         ORDER BY r.race_date, r.race_number`,
+      )
+      .bind(CLUB_ID, season, clubComp.id)
+      .all<{ id: number; name: string; race_date: string; race_number: number | null; basketed_total: number | null }>()
+  ).results;
+  const seasonRaces = await db.prepare("SELECT COUNT(*) AS n FROM race WHERE club_id = ? AND season = ? AND kind = 'race' AND included = 1").bind(CLUB_ID, season).first<{ n: number }>();
+  const index = opts.raceId ? weeks.findIndex((w) => w.id === opts.raceId) : weeks.length - 1;
+  if (index < 0) {
+    if (opts.raceId) throw new UserError("That race has no published result yet.", 404);
+    return { season, weeks: [], week: null, club: null, bird: null };
+  }
+  const week = weeks[index]!;
+  const prev = weeks[index - 1] ?? null;
+  const at = (w: { race_date: string; race_number: number | null }) => ({ date: w.race_date, number: w.race_number });
+
+  const withMovement = async (comp: CompetitionRow, limit: number) => {
+    const now = await championship(db, comp.id, season, { upTo: at(week) });
+    const before = prev ? await championship(db, comp.id, season, { upTo: at(prev) }) : null;
+    const key = (s: { ring?: string; fancierId: number | null }) => s.ring ?? String(s.fancierId);
+    const prevRank = new Map((before?.standings ?? []).map((s) => [key(s as { ring?: string; fancierId: number | null }), s.rank]));
+    const leader = now.standings[0]?.total ?? 0;
+    return {
+      competition: now.competition,
+      racesCounted: now.races.length,
+      standings: now.standings.slice(0, limit).map((s) => {
+        const p = prevRank.get(key(s as { ring?: string; fancierId: number | null }));
+        return {
+          ...s,
+          thisWeek: s.perRace[String(week.id)] ?? 0,
+          previousRank: p ?? null,
+          movement: before === null ? null : p === undefined ? "new" : p - s.rank,
+          behind: Math.round((leader - s.total) * 100) / 100,
+        };
+      }),
+      total: now.standings.length,
+    };
+  };
+
+  const detail = await raceDetail(db, week.id, new Date());
+  const raceResult = detail.results.find((r) => r.competition.id === clubComp.id)?.published ?? null;
+  return {
+    season,
+    weeks: weeks.map((w, i) => ({ id: w.id, name: w.name, date: w.race_date, number: w.race_number, week: i + 1 })),
+    week: {
+      number: index + 1,
+      of: seasonRaces?.n ?? weeks.length,
+      race: { id: week.id, name: week.name, date: week.race_date, raceNumber: week.race_number, basketed: week.basketed_total, returned: detail.returned },
+      firstBird: detail.firstBird,
+      podium: raceResult ? raceResult.fanciers.slice(0, 3) : [],
+    },
+    club: await withMovement(clubComp, 10),
+    bird: birdComp ? await withMovement(birdComp, 10) : null,
   };
 }
 

@@ -8,7 +8,7 @@ import { BenzingClient } from "./benzingClient";
 import type { Env } from "./env";
 import { BUILD_ID } from "../generated/build";
 import {
-  adminOverview, adminRaceDetail, championship, defaultSeason, fancierDetail, home, listCompetitions, listRaces, live, raceDetail, seasons,
+  adminOverview, adminRaceDetail, championship, defaultSeason, fancierDetail, home, leaderboard, listCompetitions, listRaces, live, raceDetail, seasons,
 } from "./queries";
 import { SYSTEMS } from "../core/scoring/systems";
 import {
@@ -134,6 +134,15 @@ async function handleApiInner(request: Request, env: Env, deps: ApiDeps = {}): P
     if (path === "/api/live") return json(await live(db, now));
     const compParam = url.searchParams.get("competition");
     if (path === "/api/competitions") return json(await listCompetitions(db));
+    if (path === "/api/leaderboard") {
+      return json(
+        await leaderboard(db, await seasonParam(), {
+          raceId: Number(url.searchParams.get("race")) || undefined,
+          club: url.searchParams.get("club"),
+          bird: url.searchParams.get("bird"),
+        }),
+      );
+    }
     if (path === "/api/championship") return json(await championship(db, compParam, await seasonParam()));
     if (path === "/api/championship/export.csv" || path === "/api/championship/whatsapp") {
       const c = await championship(db, compParam, await seasonParam());

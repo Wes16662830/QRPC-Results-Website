@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { handleApi } from "../src/server/api";
 import { setMemberPassword } from "../src/server/auth";
 import type { Env } from "../src/server/env";
-import { adminRaceDetail, championship, live, raceDetail } from "../src/server/queries";
+import { adminRaceDetail, championship, leaderboard, live, raceDetail } from "../src/server/queries";
 import {
   addOverride, calculateResults, crossCheck, isLiveActive, pollLive, publish, recalculateRace,
   recalculateSeason, revokeOverride, sastToUtc, syncRaces, updateCompetition, createCompetition, setCompetitionRace, setCompetitionRaceParams, updateRace, type Ctx, type StoredArrival,
@@ -345,6 +345,40 @@ describe("competitions (multiple result systems)", () => {
     expect([d.lines[0]!.points, d.lines.at(-1)!.points]).toEqual([50, 19]); // 32 scoring birds: 50 … 19
     // Glenn: scoring places 5, 8, 9, 10, 11 → 46 + 43 + 42 + 41 + 40 = 212.
     expect(d.fanciers[0]).toMatchObject({ fancierName: "Glenn Mcewan", score: 212 });
+  });
+
+  it("weekly leaderboard: standings as of each week, with movement since the week before", async () => {
+    const m1 = readFileSync(new URL("../fixtures/benzing/r-6429-t-17076-matatiele-1.html", import.meta.url), "utf8");
+    const { db, ctx } = setup({ "/za/en/results/view/r-6429-t-17076-matatiele-1/": m1 });
+    const mooi = await mooiRiverId(ctx);
+    const mat1 = (await db.prepare("SELECT id FROM race WHERE benzing_race_id = 6429").first<{ id: number }>())!.id;
+    for (const id of [mat1, mooi]) await calculateResults(ctx, id, ADMIN);
+    await recalculateRace(ctx, mooi, ADMIN); // pick up Matatiele 1 as the first-race base
+    for (const id of [mat1, mooi]) await publish(ctx, id, ADMIN, true);
+
+    const lb = await leaderboard(db, 2026);
+    expect(lb.weeks.map((w) => [w.week, w.name])).toEqual([[1, "MATATIELE 1"], [2, "MooiRiver"]]);
+    expect(lb.week).toMatchObject({ number: 2, of: 9, race: { name: "MooiRiver", basketed: 372, returned: 265 } });
+    expect(lb.week!.podium[0]).toMatchObject({ fancierName: "Glenn Mcewan", score: 142 });
+    expect(lb.week!.firstBird).toMatchObject({ fancierName: "Wesley Phillips" });
+    // Club championship after week 2 = Matatiele 1 + Mooi River, with movement since week 1.
+    const club = lb.club!;
+    expect(club.racesCounted).toBe(2);
+    const glenn = club.standings.find((x) => x.fancierName === "Glenn Mcewan")!;
+    expect(glenn).toMatchObject({ total: 128 + 142, thisWeek: 142 });
+    expect(club.standings[0]!.behind).toBe(0);
+    expect(club.standings.every((x) => typeof x.movement === "number")).toBe(true);
+    // Best bird by ring, with this week's points.
+    expect(lb.bird!.competition.slug).toBe("best-bird");
+    expect(lb.bird!.standings).toHaveLength(10);
+
+    // Week 1: no previous week, so no movement yet.
+    const w1 = await leaderboard(db, 2026, { raceId: mat1 });
+    expect(w1.week!.number).toBe(1);
+    expect(w1.club!.racesCounted).toBe(1);
+    expect(w1.club!.standings.every((x) => x.movement === null)).toBe(true);
+    await expect(leaderboard(db, 2026, { raceId: 999 })).rejects.toThrow(/no published result/);
+    expect((await leaderboard(db, 2027)).week).toBeNull();
   });
 
   it("best bird, distance bands, wins and top 25 %: standings by bird, by count and by season ratio", async () => {

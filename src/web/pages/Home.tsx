@@ -27,7 +27,19 @@ export function HomePage() {
       )}
 
       <div className="grid gap-4 md:grid-cols-2">
-        <Card title="Latest result" right={latest && <StateBadge state={latest.race.state} />}>
+        <Card
+          title="Latest result"
+          right={
+            latest && (
+              <span className="flex items-center gap-2">
+                <Link to="/leaderboard" className="text-sm text-muted underline">
+                  Leaderboard
+                </Link>
+                <StateBadge state={latest.race.state} />
+              </span>
+            )
+          }
+        >
           {latest ? (
             <>
               <Link to={`/races/${latest.race.id}`} className="text-lg font-semibold underline decoration-line underline-offset-4">
