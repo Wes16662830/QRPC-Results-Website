@@ -3,7 +3,7 @@
  * Member routes need the club session cookie; /api/admin/* need a verified Cloudflare Access identity.
  */
 import { csv, fmtArrival, whatsappRaceSummary, whatsappStandings } from "../core/exports";
-import { isMember, logoutCookie, memberLogin, setMemberPassword, verifyAccessJwt } from "./auth";
+import { checkAccessJwt, isMember, logoutCookie, memberLogin, readCookie, setMemberPassword } from "./auth";
 import { BenzingClient } from "./benzingClient";
 import type { Env } from "./env";
 import {
@@ -18,7 +18,7 @@ import {
 export interface ApiDeps {
   benzing?: BenzingClient;
   now?: () => Date;
-  accessFetch?: typeof fetch;
+  accessFetch?: (url: string) => Promise<Response>;
 }
 
 const json = (data: unknown, status = 200, headers: Record<string, string> = {}) =>
@@ -50,20 +50,19 @@ function checkCsrf(request: Request) {
   if (request.headers.get("X-QRPC") !== "1") throw new UserError("Missing request header.", 403);
 }
 
-async function adminEmail(request: Request, env: Env, now: Date, deps: ApiDeps): Promise<string | null> {
+async function adminCheck(request: Request, env: Env, now: Date, deps: ApiDeps): Promise<{ email: string | null; reason?: string }> {
   if (env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD) {
-    return verifyAccessJwt(
-      request.headers.get("Cf-Access-Jwt-Assertion"),
-      { teamDomain: env.ACCESS_TEAM_DOMAIN, aud: env.ACCESS_AUD },
-      now,
-      deps.accessFetch,
-    );
+    // Access normally adds the header; its CF_Authorization cookie carries the same signed token.
+    const token = request.headers.get("Cf-Access-Jwt-Assertion") ?? readCookie(request, "CF_Authorization");
+    return checkAccessJwt(token, { teamDomain: env.ACCESS_TEAM_DOMAIN, aud: env.ACCESS_AUD }, now, deps.accessFetch);
   }
   // Local development only: no Access configured and the request is to localhost.
   const host = new URL(request.url).hostname;
-  if (env.DEV_ADMIN_EMAIL && (host === "localhost" || host === "127.0.0.1")) return env.DEV_ADMIN_EMAIL;
-  return null;
+  if (env.DEV_ADMIN_EMAIL && (host === "localhost" || host === "127.0.0.1")) return { email: env.DEV_ADMIN_EMAIL };
+  return { email: null, reason: "Cloudflare Access is not configured for this site" };
 }
+
+const adminEmail = async (request: Request, env: Env, now: Date, deps: ApiDeps) => (await adminCheck(request, env, now, deps)).email;
 
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_FAILURES = 10;
@@ -98,8 +97,12 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
 
     // ----- admin -----
     if (path.startsWith("/api/admin")) {
-      const actor = await adminEmail(request, env, now, deps);
-      if (!actor) return json({ error: "Admin sign-in required (Cloudflare Access)." }, 401);
+      const check = await adminCheck(request, env, now, deps);
+      if (!check.email) {
+        console.warn("admin refused:", check.reason);
+        return json({ error: `Admin sign-in failed: ${check.reason}.` }, 401);
+      }
+      const actor = check.email;
       return await adminRoutes(request, path, url, ctx, actor, now, m, seasonParam);
     }
 

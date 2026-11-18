@@ -96,8 +96,8 @@ export async function isMember(db: D1Database, secret: string, request: Request,
 interface Jwk { kid: string; kty: string; n: string; e: string; alg?: string }
 let certCache: { at: number; domain: string; keys: Jwk[] } | null = null;
 
-async function accessKeys(teamDomain: string, fetcher: typeof fetch): Promise<Jwk[]> {
-  if (certCache && certCache.domain === teamDomain && Date.now() - certCache.at < 3600_000) return certCache.keys;
+async function accessKeys(teamDomain: string, fetcher: (url: string) => Promise<Response>, refresh = false): Promise<Jwk[]> {
+  if (!refresh && certCache && certCache.domain === teamDomain && Date.now() - certCache.at < 3600_000) return certCache.keys;
   const res = await fetcher(`https://${teamDomain}/cdn-cgi/access/certs`);
   if (!res.ok) throw new Error(`Access certs: HTTP ${res.status}`);
   const keys = ((await res.json()) as { keys: Jwk[] }).keys;
@@ -105,16 +105,22 @@ async function accessKeys(teamDomain: string, fetcher: typeof fetch): Promise<Jw
   return keys;
 }
 
-/** Verifies the Cf-Access-Jwt-Assertion header. Returns the admin's email, or null. */
-export async function verifyAccessJwt(
+export type AccessCheck = { email: string; reason?: undefined } | { email: null; reason: string };
+
+/**
+ * Verifies a Cloudflare Access JWT (from the Cf-Access-Jwt-Assertion header or the CF_Authorization cookie).
+ * Returns the admin's email, or the reason it was refused. Reasons never contain the token.
+ */
+export async function checkAccessJwt(
   token: string | null,
   cfg: { teamDomain: string; aud: string },
   now: Date,
-  fetcher: typeof fetch = fetch,
-): Promise<string | null> {
-  if (!token) return null;
+  fetcher: (url: string) => Promise<Response> = (url) => fetch(url),
+): Promise<AccessCheck> {
+  const no = (reason: string): AccessCheck => ({ email: null, reason });
+  if (!token) return no("no Access token on the request");
   const parts = token.split(".");
-  if (parts.length !== 3) return null;
+  if (parts.length !== 3) return no("Access token is not a JWT");
   const [h, p, s] = parts as [string, string, string];
   let header: { kid?: string; alg?: string };
   let payload: { aud?: string | string[]; exp?: number; nbf?: number; iss?: string; email?: string };
@@ -122,17 +128,43 @@ export async function verifyAccessJwt(
     header = JSON.parse(new TextDecoder().decode(fromB64url(h)));
     payload = JSON.parse(new TextDecoder().decode(fromB64url(p)));
   } catch {
-    return null;
+    return no("Access token could not be decoded");
   }
-  if (header.alg !== "RS256") return null;
-  const jwk = (await accessKeys(cfg.teamDomain, fetcher)).find((k) => k.kid === header.kid);
-  if (!jwk) return null;
+  if (header.alg !== "RS256") return no(`unexpected token algorithm ${header.alg}`);
+  let keys: Jwk[];
+  try {
+    keys = await accessKeys(cfg.teamDomain, fetcher);
+  } catch (e) {
+    return no(`could not load Access signing keys from ${cfg.teamDomain}: ${(e as Error).message}`);
+  }
+  let jwk = keys.find((k) => k.kid === header.kid);
+  if (!jwk) {
+    // Cloudflare rotates signing keys; an unknown key id means our cached copy may be stale.
+    try {
+      jwk = (await accessKeys(cfg.teamDomain, fetcher, true)).find((k) => k.kid === header.kid);
+    } catch {
+      /* fall through */
+    }
+  }
+  if (!jwk) return no("token signed with an unknown key");
   const key = await crypto.subtle.importKey("jwk", { kty: jwk.kty, n: jwk.n, e: jwk.e, alg: "RS256", ext: true }, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
-  const ok = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, fromB64url(s), enc.encode(`${h}.${p}`));
-  if (!ok) return null;
+  if (!(await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, fromB64url(s), enc.encode(`${h}.${p}`)))) return no("token signature is invalid");
   const auds = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
   const t = now.getTime() / 1000;
-  if (!auds.includes(cfg.aud) || !payload.exp || payload.exp < t || (payload.nbf && payload.nbf > t + 60)) return null;
-  if (payload.iss !== `https://${cfg.teamDomain}`) return null;
-  return payload.email ?? null;
+  if (!auds.includes(cfg.aud)) return no("token is for a different Access application (audience mismatch)");
+  if (!payload.exp || payload.exp < t) return no("token has expired");
+  if (payload.nbf && payload.nbf > t + 60) return no("token is not valid yet");
+  if (payload.iss !== `https://${cfg.teamDomain}`) return no(`token issuer ${payload.iss} does not match ${cfg.teamDomain}`);
+  if (!payload.email) return no("token has no email");
+  return { email: payload.email };
+}
+
+/** Email of the verified admin, or null. */
+export async function verifyAccessJwt(
+  token: string | null,
+  cfg: { teamDomain: string; aud: string },
+  now: Date,
+  fetcher?: (url: string) => Promise<Response>,
+): Promise<string | null> {
+  return (await checkAccessJwt(token, cfg, now, fetcher)).email;
 }

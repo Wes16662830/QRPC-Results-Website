@@ -46,7 +46,8 @@ export function AdminApp() {
     return (
       <>
         <PageTitle title="Admin" />
-        <ErrorBox error={overview.error.status === 401 ? "Admin sign-in is needed. Open /admin through Cloudflare Access." : overview.error} />
+        <ErrorBox error={overview.error} />
+        {overview.error.status === 401 && <p className="mt-3 text-sm text-muted">Admin is reached through Cloudflare Access at /admin. Try a private window; if this keeps happening, send the message above to whoever maintains the site.</p>}
       </>
     );
   }
