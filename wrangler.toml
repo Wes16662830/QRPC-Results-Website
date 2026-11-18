@@ -9,3 +9,10 @@ database_name = "qrpc-results"
 # Created in the Cloudflare dashboard (D1 → qrpc-results).
 database_id = "c4c74c72-4a5b-4f62-9001-0599ffbf85ea"
 migrations_dir = "migrations"
+
+# Plain settings must live here: with a wrangler.toml, Pages ignores plain variables set in the dashboard.
+# (Secrets such as SESSION_SECRET stay in the dashboard.) Neither value below is secret.
+[vars]
+ACCESS_TEAM_DOMAIN = "wesleyphillips.cloudflareaccess.com"
+# Audience tag of the Access application "QRPC Results admin" (/admin and /api/admin).
+ACCESS_AUD = "32208fcb4a67c69ca8fb503724ad6dcc24aa009575eb43d88fb51c36d1fe473f"

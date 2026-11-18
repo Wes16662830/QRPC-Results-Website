@@ -37,8 +37,9 @@ Docs: [`docs/benzing-api.md`](docs/benzing-api.md) (data source) · [`docs/phase
 4. **Cloudflare Access (admin login).** Go to Zero Trust → Access → Applications → *Add* → Self-hosted.
    - Domain: `<your-project>.pages.dev`, paths **`admin`** and **`api/admin`** (one application, two paths).
    - Policy: *Allow* → Emails → your email address. Login method: one-time PIN is fine.
-   - Copy the application's **Audience (AUD) tag**. In Pages variables, set `ACCESS_AUD` to it and
-     `ACCESS_TEAM_DOMAIN` to `<your-team>.cloudflareaccess.com`.
+   - Copy the application's **Audience (AUD) tag**. Put it and your team domain in the `[vars]` section of
+     `wrangler.toml` (`ACCESS_AUD`, `ACCESS_TEAM_DOMAIN`). Plain variables set in the Pages dashboard are
+     **ignored** when the repo has a `wrangler.toml`; only secrets (like `SESSION_SECRET`) belong in the dashboard.
    - The API also verifies the Access token itself, so admin actions stay locked even if a policy is wrong.
 5. **Live poller Worker.** Go to Workers & Pages → Create → Worker → *Import a repository* → this repo, with
    **root directory `worker`**. It deploys on every push. (Or run `npm run worker:deploy` from your machine.)
