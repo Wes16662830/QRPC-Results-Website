@@ -23,7 +23,7 @@ npm run typecheck
 
 | Path | What |
 |---|---|
-| `src/core/benzing/` | Benzing adapter: parsing and validation of Benzing pages (the only code that knows Benzing's format) |
+| `src/core/benzing/` | Benzing adapter: result-sheet HTML parser, live-arrivals JSON parser, validation (the only code that knows Benzing's formats) |
 | `src/core/scoring/` | 5-bird race and season engine (pure, fully tested) |
 | `fixtures/benzing/` | Real Benzing responses captured for tests |
 | `docs/` | API findings and the build plan |

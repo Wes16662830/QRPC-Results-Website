@@ -14,11 +14,11 @@ unauthenticated, read-only GET requests at about 1 request per second.
 | Benzing's own competitions | `GET /api/v2/za/smartclub/48/{season}/competitions` | **No** | JSON |
 | Competition standings | `GET /api/v2/za/competition/{competitionId}/results?page=N` | **No** | JSON |
 | **Every arrival for a race** | `GET /za/en/results/view/r-{raceId}-t-{resultId}-{slug}/` | **No** | **HTML only** |
-| Live arrivals while a race is in progress | `POST /index.php?pid=ajax_on_the_fly_results` (`action: load_arrivals`) | **Yes** | JSON |
+| **Live arrivals** (also the arrivals of completed races) | `GET /api/v2/za/club-races/{raceId}/on-the-fly/arrivals?page_number=N&limit=100` | **No** | JSON |
 | Race overview page `/za/en/results/{season}/r-{raceId}-{slug}/` | 302 redirect to OAuth | Yes | n/a |
 
-**Bottom line:** everything needed for completed races (the full truck result, the 5-bird result and the
-championship) is available **without signing in**. Only the **live race board** needs a Benzing session.
+**Bottom line:** everything, **including the live board**, is available **without signing in**. The app stores
+no Benzing credentials. (Confirmed from Wes's HAR file on 18 Nov 2026, then repeated without a sign-in.)
 
 ## 1. Season race list
 
@@ -112,29 +112,48 @@ usable for the season list. It is useful for `fancierCompetition`, `pigeonCompet
 This is **the only public source of Benzing `fancier_id`s**, which is useful for linking fancier names to
 stable IDs. Benzing's championship scores themselves are not used.
 
-## 5. Live race data (sign-in needed)
+## 5. Live arrivals (JSON, public)
 
-The live board ("on-the-fly results") calls `POST /index.php?pid=ajax_on_the_fly_results` with
-`{action: "load_arrivals", race_id, page_number}`. Without a session this returns HTTP 500. The page route
-`/za/en/results/on-the-fly/r-{id}-{slug}/by-speed/` redirects to OAuth.
+Found in Wes's HAR file of the signed-in on-the-fly page, then confirmed to return the same data **without a sign-in**:
 
-### Authentication
+`GET /api/v2/za/club-races/6975/on-the-fly/arrivals?page_number=1&limit=100&show_reported=1`
 
-- The site redirects to `https://oauth.benzing.live/oauth/authorize?response_type=code&client_id=1&redirect_uri=https://mypigeons.benzing.live/login/callback`
-  (an OAuth 2 authorisation-code flow for Benzing's own first-party client).
-- After the callback, the portal is a classic PHP app that uses a **session cookie**. The `/api/v2` calls come
-  from the same origin, so they presumably use that same cookie (not verified).
-- A server *could* sign in by scripting the OAuth login form with a username and password. That is fragile
-  (CSRF tokens, possible captcha) and may breach Benzing's terms. A pasted session cookie is simpler,
-  but it expires.
-- **Not verified:** the login form fields, cookie name and lifetime, and the live response shape. To verify
-  these I need a HAR file from you while you're signed in and viewing a live race. Until then the
-  live board is unspecified.
+- `limit` must be at most 100 (HTTP 422 above that). `page_number` starts at 1. A 400-bird race takes 4 calls.
+- The browser also sends `authorized-user: 1`, `instance-id`, `language-code: en` and `X-Requested-With`.
+  None of these are needed for the public call.
+- Response: `{ arrivals[], page_count, arrival_count, race_status, is_admin, connected_fancier_ids, … }`
+- Each arrival: `arrival_id`, `pigeon_id`, **`fancier_id`**, `fancier_name`, `pigeon_string` (ring),
+  `sex` (`A`/`H`), **`rank_to_display` (unique, no shared ranks)**, `nomination`, `speed` (string, 3 dp),
+  `distance` (float km), `time_of_arrival`, `day_of_arrival`, `data_type` (`L` = live clocking),
+  `loft_position`, `basketed_pigeons`, `clock_deviation_*`, `source`.
+
+**Cross-check, all 9 races of 2026:** the live arrival count equals the full result sheet's row count in every
+race. For Mooi River, every ring, speed, distance, arrival day and time, and basketed count is identical. The
+only difference is ranking: the sheet shares ranks on equal speeds, while live ranks are unique and in the same row order.
+
+Use: the **live board and provisional standings** come from this endpoint. **Published 5-bird results** still
+come from the full result sheet, as Wes asked. On every final import the two are compared, and any difference
+raises an admin alert instead of publishing. The live feed is raw clockings, so a bird Benzing removes during
+evaluation would appear in the live feed but not on the sheet.
+
+Also seen in the HAR (POST, read-only actions, **need a sign-in**, so we don't use them):
+`index.php?pid=ajax_race` with `get_race_panel_data` (status text such as "Being evaluated", liberation
+coordinates, race duration) and `get_race_panel_connected_races`.
+
+### Authentication (for the record; not needed)
+
+The site uses OAuth (`oauth.benzing.live`, client_id 1) and then cookies: `PHPSESSID`, `access_token`,
+`refresh_token` and `remember_web_*`. Its JavaScript refreshes tokens through `index.php?pid=ajax_refresh_tokens`
+and sends `Authorization: Bearer <access_token>` on retries.
+
+**Unknown until a live race:** which `race_status` values mean "basketed / in flight / evaluated". The values seen so far are
+`R` on the 9 evaluated races, and `H` and `S` on trainings. The sync worker therefore doesn't rely on status. It polls live from
+liberation time on race day until an admin closes the race (or 24 h pass with no new arrival).
 
 ## Request etiquette used
 
 - User-Agent `QRPC-Results/0.1 (Queenstown RPC results site; read-only)`
-- At most 1 request per second; GET only, except for the single unauthenticated `load_arrivals` read probe.
+- At most 1 request per second; GET only, except for two unauthenticated read-only POST probes (both refused).
 - Response headers: `server: nginx`, `cache-control: no-cache, private`. There is no Cloudflare or bot
   protection in front of the site, and no rate-limit headers.
 

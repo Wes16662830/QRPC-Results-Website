@@ -14,7 +14,7 @@ Status: **approved 18 Nov 2026.** The points engine, the result parser and the a
 | Plan | **Workers Free**, for as long as it holds (see limits below) |
 | Late birds | A fancier's first 5 birds home score, **however late they arrive**. There is no closing cut-off for scoring. |
 | Ties | **No shared positions** for scoring birds. Benzing *does* share positions on equal speeds, so the engine breaks exact ties by the row order on Benzing's sheet **for now**. See open question T1. |
-| Live board | Yes. Needs a Benzing session (see `benzing-api.md` §5). |
+| Live board | Yes. Benzing's live arrivals JSON is **public**, so **no Benzing credentials are stored anywhere**. |
 | 5-bird source | Built **only** from the arrivals on the full results sheet (the Benzing result type with `percentage = 100`). It ignores Benzing's points, competitions and championships completely. |
 
 ## Architecture
@@ -56,10 +56,11 @@ Why the stack differs from the original brief:
 
 - Every minute it checks for work, and makes no Benzing calls when there's nothing to do.
 - **Season list:** `smartclub/48/{season}/races` and `/training-races`, every 6 hours, and on demand from admin.
-- **Live race:** from liberation time on race day until an admin marks the race closed, it reads live arrivals
-  every 60 s (needs a Benzing session).
+- **Live race:** from liberation time on race day until an admin closes the race (or 24 h pass with no new arrival),
+  it reads the public live arrivals JSON every 60 s (100 birds per call, so at most 4 calls per poll).
 - **After a race:** it checks for the full (100 %) result every 15 minutes. When the result appears, or its
-  "last re-calculation" time changes, it takes a new snapshot and creates a **draft** 5-bird calculation.
+  "last re-calculation" time changes, it takes a new snapshot, compares it bird by bird with the live JSON
+  (an alert on any difference), and creates a **draft** 5-bird calculation from the sheet.
 - **Validation before saving:** 10 cells per row, positions 1..n with no gaps, speeds never increasing down the
   list, row count = number returned, and the loft denominators add up to no more than the number basketed.
   If a check fails, nothing is saved, an alert is raised, and the last good data stays live.
@@ -95,7 +96,7 @@ All tables carry `club_id` (QRPC = Benzing org 48) so multi-club support (Phase 
 | Table | Key columns |
 |---|---|
 | `club` | id, benzing_org_id, country, name |
-| `fancier` | id, club_id, name, benzing_fancier_id (nullable, linked via competitions API), active |
+| `fancier` | id, club_id, name, benzing_fancier_id (from the live JSON `fancier_id`), active |
 | `race` | id, club_id, benzing_race_id, season, number, name, slug, date, liberation_time, liberation_point, min/max_distance_m, basketed_total, fanciers_total, **kind** (race / training), **included**, status (scheduled / live / awaiting_result / complete), full_result_id, last_synced_at |
 | `snapshot` | id, race_id, kind (live / final), fetched_at, source_url, content_sha256, raw (compressed text), row_count, header_json |
 | `arrival` | id, snapshot_id, race_id, benzing_position, nomination, fancier_id, ring, arrival_day, arrival_time, arrived_at (UTC), speed_milli, distance_m, loft_order, loft_basketed |
@@ -108,7 +109,6 @@ All tables carry `club_id` (QRPC = Benzing org 48) so multi-club support (Phase 
 | `season_calc` | id, season, settings_version_id, race_calc_ids_json, created_at; plus `season_calc_score` (fancier_id, total, counted_race_ids) |
 | `alert` | id, at, level, source, message, resolved_at |
 | `audit_log` | id, at, actor (email from the Access token), action, entity, entity_id, before_json, after_json |
-| `benzing_session` | encrypted cookie (AES-256-GCM; the key is a Worker secret), set_at, last_ok_at, expires_hint |
 
 Phase 2 hooks: `arrival.ring` becomes the key for a future `pigeon` table and the ring-book link;
 `race_entry` already holds basketed counts, which is where basket and truck costs will attach; and
@@ -137,7 +137,7 @@ Admin (behind Cloudflare Access):
 | `/admin/races` | mark each race as Race or Training/Toss, include it or not, force a re-sync |
 | `/admin/races/:id` | review the draft against the full result, add or revoke DQ overrides (reason required), **Publish**, recalculate |
 | `/admin/settings` | scoring birds, races counted, member password rotation |
-| `/admin/benzing` | paste or replace the Benzing session cookie, "Test connection", "Remove", "Connected as… / last sync" |
+| `/admin/benzing` | sync status: last successful call per endpoint, recent errors, a "Test connection" button (no credentials) |
 | `/admin/audit` | audit log |
 
 ## Open questions
@@ -151,4 +151,4 @@ Admin (behind Cloudflare Access):
   up into the 5, and every bird behind it gains a place. The alternative is that the bird stays in the ranking
   but scores 0. Which one does the club want?
 - **T3 Championship ties.** Equal season totals currently share a rank (1, 1, 3). Should there be a tiebreak instead?
-- **M4 Live board:** waiting for the HAR file and cookie names (see the chat for upload steps).
+- ~~M4 Live board~~: resolved; the live JSON is public.
