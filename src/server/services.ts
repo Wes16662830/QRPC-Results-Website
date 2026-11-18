@@ -174,33 +174,40 @@ export async function competitionExclusions(db: D1Database, competitionId: numbe
 
 // ---------- sync race list (admin button) ----------
 
-async function upsertRace(db: D1Database, r: BenzingRace, kind: "race" | "training", now: Date) {
-  const full = pickFullResult(r.results);
-  const existing = await db.prepare("SELECT id FROM race WHERE club_id = ? AND benzing_race_id = ?").bind(CLUB_ID, r.benzingRaceId).first<{ id: number }>();
-  const fields = [
-    r.season, r.raceNumber, r.name, r.slug, r.date, r.liberationTime, r.minDistanceM, r.maxDistanceM,
-    r.basketedTotal, r.fanciersTotal, r.status, full?.id ?? null, JSON.stringify(r.results), iso(now),
-  ];
-  if (existing) {
-    // Only Benzing-owned fields are refreshed; admin choices (kind, included, live_mode) are kept.
-    await db
+/*
+ * Cloudflare's free plan allows only 50 D1 queries per request, so writes are grouped with db.batch()
+ * (one query each) and lookups are done once, not per row.
+ */
+
+/** Statements that insert or refresh races from Benzing. Admin choices (kind, included, live_mode) are kept. */
+async function upsertRaces(db: D1Database, items: { r: BenzingRace; kind: "race" | "training" }[], now: Date) {
+  if (items.length === 0) return;
+  const rows = await db.prepare("SELECT id, benzing_race_id FROM race WHERE club_id = ?").bind(CLUB_ID).all<{ id: number; benzing_race_id: number }>();
+  const existing = new Map(rows.results.map((x) => [x.benzing_race_id, x.id]));
+  const stmts = items.map(({ r, kind }) => {
+    const full = pickFullResult(r.results);
+    const fields = [
+      r.season, r.raceNumber, r.name, r.slug, r.date, r.liberationTime, r.minDistanceM, r.maxDistanceM,
+      r.basketedTotal, r.fanciersTotal, r.status, full?.id ?? null, JSON.stringify(r.results), iso(now),
+    ];
+    const id = existing.get(r.benzingRaceId);
+    if (id !== undefined) {
+      return db
+        .prepare(
+          `UPDATE race SET season=?, race_number=?, name=?, slug=?, race_date=?, liberation_time_local=?, min_distance_m=?, max_distance_m=?,
+           basketed_total=?, fanciers_total=?, benzing_status=?, full_result_id=?, results_json=?, synced_at=? WHERE id=?`,
+        )
+        .bind(...fields, id);
+    }
+    return db
       .prepare(
-        `UPDATE race SET season=?, race_number=?, name=?, slug=?, race_date=?, liberation_time_local=?, min_distance_m=?, max_distance_m=?,
-         basketed_total=?, fanciers_total=?, benzing_status=?, full_result_id=?, results_json=?, synced_at=? WHERE id=?`,
+        `INSERT INTO race (season, race_number, name, slug, race_date, liberation_time_local, min_distance_m, max_distance_m,
+         basketed_total, fanciers_total, benzing_status, full_result_id, results_json, synced_at, club_id, benzing_race_id, kind)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
-      .bind(...fields, existing.id)
-      .run();
-    return existing.id;
-  }
-  const res = await db
-    .prepare(
-      `INSERT INTO race (season, race_number, name, slug, race_date, liberation_time_local, min_distance_m, max_distance_m,
-       basketed_total, fanciers_total, benzing_status, full_result_id, results_json, synced_at, club_id, benzing_race_id, kind)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    )
-    .bind(...fields, CLUB_ID, r.benzingRaceId, kind)
-    .run();
-  return res.meta.last_row_id!;
+      .bind(...fields, CLUB_ID, r.benzingRaceId, kind);
+  });
+  await db.batch(stmts);
 }
 
 export async function syncRaces(ctx: Ctx, season: number, actor: string): Promise<{ races: number; trainings: number }> {
@@ -215,31 +222,37 @@ export async function syncRaces(ctx: Ctx, season: number, actor: string): Promis
     await raiseAlert(ctx.db, now, "error", "sync-races", `Could not read the ${season} race list from Benzing: ${(e as Error).message}`);
     throw new UserError(`Benzing race list failed: ${(e as Error).message}`, 502);
   }
-  for (const r of races) await upsertRace(ctx.db, r, "race", now);
-  for (const r of trainings) await upsertRace(ctx.db, r, "training", now);
+  await upsertRaces(ctx.db, [...races.map((r) => ({ r, kind: "race" as const })), ...trainings.map((r) => ({ r, kind: "training" as const }))], now);
   await audit(ctx.db, now, actor, "sync-races", "season", season, { races: races.length, trainings: trainings.length });
   return { races: races.length, trainings: trainings.length };
 }
 
 // ---------- calculate results (admin button) ----------
 
-async function upsertFancier(db: D1Database, name: string, benzingId: number | null): Promise<number> {
-  if (benzingId !== null) {
-    const byId = await db.prepare("SELECT id, name FROM fancier WHERE club_id = ? AND benzing_fancier_id = ?").bind(CLUB_ID, benzingId).first<{ id: number; name: string }>();
+/** Creates or updates fanciers (matched by Benzing id, then by name). Returns name → our id. Three queries in total. */
+async function upsertFanciers(db: D1Database, people: { name: string; benzingId: number | null }[]): Promise<Map<string, number>> {
+  type Row = { id: number; name: string; benzing_fancier_id: number | null };
+  const load = async () => (await db.prepare("SELECT id, name, benzing_fancier_id FROM fancier WHERE club_id = ?").bind(CLUB_ID).all<Row>()).results;
+  const rows = await load();
+  const stmts = [];
+  for (const p of people) {
+    const byId = p.benzingId === null ? undefined : rows.find((r) => r.benzing_fancier_id === p.benzingId);
     if (byId) {
-      if (byId.name !== name) await db.prepare("UPDATE fancier SET name = ? WHERE id = ?").bind(name, byId.id).run();
-      return byId.id;
+      if (byId.name !== p.name) stmts.push(db.prepare("UPDATE fancier SET name = ? WHERE id = ?").bind(p.name, byId.id));
+      continue;
     }
-  }
-  const byName = await db.prepare("SELECT id, benzing_fancier_id FROM fancier WHERE club_id = ? AND name = ?").bind(CLUB_ID, name).first<{ id: number; benzing_fancier_id: number | null }>();
-  if (byName) {
-    if (benzingId !== null && byName.benzing_fancier_id === null) {
-      await db.prepare("UPDATE fancier SET benzing_fancier_id = ? WHERE id = ?").bind(benzingId, byName.id).run();
+    const byName = rows.find((r) => r.name === p.name);
+    if (byName) {
+      if (p.benzingId !== null && byName.benzing_fancier_id === null) {
+        stmts.push(db.prepare("UPDATE fancier SET benzing_fancier_id = ? WHERE id = ?").bind(p.benzingId, byName.id));
+      }
+      continue;
     }
-    return byName.id;
+    stmts.push(db.prepare("INSERT INTO fancier (club_id, name, benzing_fancier_id) VALUES (?, ?, ?)").bind(CLUB_ID, p.name, p.benzingId));
   }
-  const res = await db.prepare("INSERT INTO fancier (club_id, name, benzing_fancier_id) VALUES (?, ?, ?)").bind(CLUB_ID, name, benzingId).run();
-  return res.meta.last_row_id!;
+  if (stmts.length === 0) return new Map(rows.map((r) => [r.name, r.id]));
+  await db.batch(stmts);
+  return new Map((await load()).map((r) => [r.name, r.id]));
 }
 
 /** Compares the result sheet with the live feed. Returns human-readable differences (max 10). */
@@ -349,7 +362,7 @@ export async function calculateResults(ctx: Ctx, raceId: number, actor: string):
   try {
     const list = await ctx.benzing.raceList(c, race.season, race.kind === "race" ? "races" : "training-races");
     const fresh = list.find((r) => r.benzingRaceId === race.benzing_race_id);
-    if (fresh) await upsertRace(ctx.db, fresh, race.kind, now);
+    if (fresh) await upsertRaces(ctx.db, [{ r: fresh, kind: race.kind }], now);
     race = await getRace(ctx.db, raceId);
   } catch (e) {
     throw new UserError(`Could not reach Benzing: ${(e as Error).message}`, 502);
@@ -418,11 +431,13 @@ export async function calculateResults(ctx: Ctx, raceId: number, actor: string):
   for (const a of sheetArrivals) returned.set(a.fancierName, (returned.get(a.fancierName) ?? 0) + 1);
   const firstIdByName = new Map<string, number | null>();
   for (const a of sheetArrivals) if (!firstIdByName.get(a.fancierName)) firstIdByName.set(a.fancierName, a.benzingFancierId);
-  await ctx.db.prepare("DELETE FROM race_entry WHERE race_id = ?").bind(race.id).run();
-  for (const [name, basketed] of basketedSum) {
-    const fid = await upsertFancier(ctx.db, name, firstIdByName.get(name) ?? null);
-    await ctx.db.prepare("INSERT INTO race_entry (race_id, fancier_id, basketed, returned) VALUES (?, ?, ?, ?)").bind(race.id, fid, basketed, returned.get(name) ?? 0).run();
-  }
+  const ids = await upsertFanciers(ctx.db, [...basketedSum.keys()].map((name) => ({ name, benzingId: firstIdByName.get(name) ?? null })));
+  await ctx.db.batch([
+    ctx.db.prepare("DELETE FROM race_entry WHERE race_id = ?").bind(race.id),
+    ...[...basketedSum].map(([name, basketed]) =>
+      ctx.db.prepare("INSERT INTO race_entry (race_id, fancier_id, basketed, returned) VALUES (?, ?, ?, ?)").bind(race.id, ids.get(name)!, basketed, returned.get(name) ?? 0),
+    ),
+  ]);
   if (race.basketed_total !== null && sumBasketed < race.basketed_total) {
     warnings.push(
       `${race.basketed_total - sumBasketed} basketed birds belong to fanciers with no birds home; Benzing does not name them publicly.`,

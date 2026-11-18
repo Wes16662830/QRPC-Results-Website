@@ -179,7 +179,17 @@ export async function handleApi(request: Request, env: Env, deps: ApiDeps = {}):
     return json({ error: "Not found" }, 404);
   } catch (e) {
     if (e instanceof UserError) return json({ error: e.message }, e.status);
-    console.error("API error", (e as Error).message);
+    const message = e instanceof Error ? e.message : String(e);
+    console.error("API error", path, message);
+    if (path.startsWith("/api/admin")) {
+      // Admins see the real cause, and it is kept as an alert for later diagnosis.
+      try {
+        await db.prepare("INSERT INTO alert (at, level, source, message) VALUES (?, 'error', 'api', ?)").bind(now.toISOString(), `${request.method} ${path}: ${message}`).run();
+      } catch {
+        /* the database itself may be what failed */
+      }
+      return json({ error: `Unexpected error: ${message}` }, 500);
+    }
     return json({ error: "Something went wrong. The last good data is still shown." }, 500);
   }
 }
