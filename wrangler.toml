@@ -6,6 +6,6 @@ compatibility_date = "2025-06-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "qrpc-results"
-# Paste the id printed by: npx wrangler d1 create qrpc-results
-database_id = "00000000-0000-0000-0000-000000000000"
+# Created in the Cloudflare dashboard (D1 → qrpc-results).
+database_id = "c4c74c72-4a5b-4f62-9001-0599ffbf85ea"
 migrations_dir = "migrations"
