@@ -69,7 +69,7 @@ I found no JSON equivalent that works without a sign-in. Each `<tr>` in the resu
 
 | # | Column | Example | Notes |
 |---|---|---|---|
-| 0 | Position | `5` | Benzing's speed rank |
+| 0 | Position | `5` | Benzing's speed rank; **equal speeds share it** (25, 25, 27) |
 | 1 | Nom. | `61` | the fancier's nomination/basket number |
 | 2 | Fancier | `[fancier name]` | name only; no fancier ID in the row |
 | 3 | Ring | `ZA-2024-XX-105` | |
@@ -143,9 +143,10 @@ The live board ("on-the-fly results") calls `POST /index.php?pid=ajax_on_the_fly
 1. **HTML scraping is the main dependency.** If Benzing changes the result page markup, the parser breaks.
    The adapter must check the shape (10 cells, positions 1..n with no gaps, row count equal to the header's
    returned count) and refuse to save a snapshot that fails these checks.
-2. **Speed has only 3 decimal places.** Mooi River has 4 pairs of equal 3 dp speeds. In one pair
-   (positions 81/82: two different fanciers at different distances) Benzing still orders one above the
-   other, so its real speeds differ beyond 3 dp. A tie rule applied to 3 dp speeds could therefore disagree
-   with Benzing.
+2. **Equal speeds share a Benzing position.** Benzing ranks competition-style: at Mooi River, rows 25/26,
+   47/48, 81/82 and 171/172 each share a position (25, 25, 27 …). Rows 81/82 are two different fanciers
+   with identical 3 dp speeds. *(The first version of this doc said that Benzing separated 81/82. That was
+   wrong: it came from numbering rows by index.)* The scoring engine therefore cannot use Benzing's position
+   as a tiebreak. It uses the row order on the sheet (`listOrder`) until the club chooses a rule.
 3. The 100 % result type depends on how the club has set things up in Benzing. If someone deletes or renames
    `FULL POINTS`, imports stop (by design).

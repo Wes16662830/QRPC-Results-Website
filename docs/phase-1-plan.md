@@ -1,6 +1,6 @@
 # Phase 1 plan: architecture, data model and pages
 
-Status: **draft, waiting for Wes's go-ahead.** No feature code is written until it's approved.
+Status: **approved 18 Nov 2026.** The points engine, the result parser and the acceptance test are built.
 
 ## Decisions so far (18 Nov 2026)
 
@@ -8,9 +8,12 @@ Status: **draft, waiting for Wes's go-ahead.** No feature code is written until 
 |---|---|
 | Hosting | Cloudflare Pages, like the other sites |
 | Admin sign-in | Cloudflare Access on `/admin*` and `/api/admin*`. No passwords or TOTP code in the app. |
-| Member sign-in | Password only (open question M1: one shared club password, or one each?) |
+| Member sign-in | **One shared club password.** It is stored as a Pages secret (hashed) and sets a signed, httpOnly cookie for 90 days. Changing the password logs everyone out. |
+| Domain | Free Cloudflare subdomain: `<project>.pages.dev` (site), `<name>.<account>.workers.dev` (sync worker, no public routes) |
+| Deploys | Git-connected: Wes pushes to `main`, Pages builds the site, Workers Builds builds the sync worker |
+| Plan | **Workers Free**, for as long as it holds (see limits below) |
 | Late birds | A fancier's first 5 birds home score, **however late they arrive**. There is no closing cut-off for scoring. |
-| Ties | **No shared positions.** Order by speed (highest first), then by Benzing's own position. Each scoring bird gets a unique position. |
+| Ties | **No shared positions** for scoring birds. Benzing *does* share positions on equal speeds, so the engine breaks exact ties by the row order on Benzing's sheet **for now**. See open question T1. |
 | Live board | Yes. Needs a Benzing session (see `benzing-api.md` §5). |
 | 5-bird source | Built **only** from the arrivals on the full results sheet (the Benzing result type with `percentage = 100`). It ignores Benzing's points, competitions and championships completely. |
 
@@ -41,9 +44,13 @@ Why the stack differs from the original brief:
   type-safe ORM that supports D1 directly. The data volume is tiny: about 10 races × 400 birds a season.
 - **PDF export** is generated in the browser (print-ready page, or jsPDF), because headless PDF rendering in
   Workers needs Cloudflare's paid Browser Rendering.
-- **Cost:** Pages, D1 and Cron Triggers fit the free tier for this traffic. The exception is CPU: the free
-  plan allows 10 ms per invocation, and parsing a 200 KB result page may exceed that. If so, Workers Paid
-  is **$5/month (about R90)** for the whole account, and you may already have it for your other sites.
+- **Free-plan limits that matter:**
+  - **10 ms CPU per invocation.** Parsing and scoring Mooi River (265 birds) takes about 2 ms median and 3.4 ms p95 in Node
+    here. Expect 2–3× that on Workers, which still fits for a 400-bird race. The parser is pure regex, with no DOM library.
+  - **5 Cron Triggers per account.** The sync worker needs **1**, so check how many your other sites use.
+  - 100 000 requests per day across Pages Functions and Workers, and D1 at 5 M reads and 100 k writes per day: far above club traffic.
+  - 50 outbound requests per invocation: each run fetches at most a few pages.
+  - If any of these is ever hit, the fix is Workers Paid ($5/month), with no code changes.
 
 ### Sync worker behaviour
 
@@ -135,12 +142,13 @@ Admin (behind Cloudflare Access):
 
 ## Open questions
 
-- **M1** "Members need a password only": should there be **one shared club password** (simplest; you change
-  it when someone leaves), or a password for each member? My recommendation is a shared one. Note that the
-  same results are already public on Benzing, so the password keeps out casual visitors, not determined ones.
-- **M2** Domain or subdomain for the site?
-- **M3** How do your other Pages sites deploy: Git-connected (push to `main` deploys), or wrangler from a
-  GitHub Action? Does the account have Workers Paid?
-- **M4** Live board: please send a HAR file, captured while signed in to Benzing, of
-  `/za/en/results/on-the-fly/r-6975-mooiriver/by-speed/`. A finished race is fine. It shows the login
-  cookie and the shape of the live data. The next real live race is the only full test.
+- **T1 Tiebreak for exactly equal speeds between different fanciers.** This happened once at Mooi River
+  (rows 81/82, both outside the scoring birds), but it will eventually decide a point. Options:
+  (a) the order on Benzing's sheet (current behaviour, though we don't know how Benzing orders it),
+  (b) the earlier clock time, (c) the longer distance, (d) the higher speed at more decimals (not available
+  without a sign-in). Ties between two birds of the *same* fancier never change their total.
+- **T2 Disqualified birds.** Currently the bird is removed before selection, so that fancier's 6th bird moves
+  up into the 5, and every bird behind it gains a place. The alternative is that the bird stays in the ranking
+  but scores 0. Which one does the club want?
+- **T3 Championship ties.** Equal season totals currently share a rank (1, 1, 3). Should there be a tiebreak instead?
+- **M4 Live board:** waiting for the HAR file and cookie names (see the chat for upload steps).
