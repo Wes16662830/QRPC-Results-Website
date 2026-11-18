@@ -82,6 +82,12 @@ export function RulesPage() {
             Further down it changes: Wesley Phillips' 3rd bird was 15th in the full result, but only 13th among scoring birds. The birds at 12 and 13 were Glenn's 6th and 7th, which don't count. So it scored 20 points.
           </p>
         </Card>
+        <p className="no-print pt-2 text-center text-xs text-muted">
+          {/* Full page load (not an in-app link) so Cloudflare Access can ask for the admin login. */}
+          <a href="/admin" className="underline underline-offset-2">
+            Club admin
+          </a>
+        </p>
       </div>
     </>
   );

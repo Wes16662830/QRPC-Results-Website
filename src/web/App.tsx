@@ -41,9 +41,9 @@ function Header({ admin, member }: { admin: boolean; member: boolean }) {
         </nav>
         <div className="flex items-center gap-2 text-sm">
           {admin && (
-            <NavLink to="/admin" className="rounded-md bg-accent px-2.5 py-1 font-semibold text-[#1b1300]">
+            <a href="/admin" className="rounded-md bg-accent px-2.5 py-1 font-semibold text-[#1b1300]">
               Admin
-            </NavLink>
+            </a>
           )}
           {member && (
             <button

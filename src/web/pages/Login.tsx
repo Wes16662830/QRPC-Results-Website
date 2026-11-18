@@ -43,6 +43,12 @@ export function LoginPage({ onLoggedIn }: { onLoggedIn: () => Promise<void> }) {
         </button>
         <p className="text-center text-xs text-muted">Ask the club secretary for the password.</p>
       </form>
+      <p className="mt-4 text-center text-xs text-muted">
+        Club admin?{" "}
+        <a href="/admin" className="underline underline-offset-2">
+          Sign in here
+        </a>
+      </p>
     </div>
   );
 }
