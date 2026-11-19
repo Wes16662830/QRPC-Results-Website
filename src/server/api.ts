@@ -265,7 +265,7 @@ async function adminRoutes(
   }
   if (path === "/api/admin/competitions") {
     if (post) {
-      const b = await body<{ name: string; system: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null; visibility?: "members" | "admin"; raceSelection?: "all" | "picked"; season?: number }>(request);
+      const b = await body<{ name: string; system: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null; visibility?: "members" | "admin"; raceSelection?: "all" | "picked"; distanceWeighting?: boolean; season?: number }>(request);
       return json(await createCompetition(ctx, b, actor, Number(b.season) || (await seasonParam())));
     }
     const comps = await listCompetitions(db, { activeOnly: false });
@@ -274,12 +274,12 @@ async function adminRoutes(
     const of = (rows: { competition_id: number; race_id: number }[], id: number) => rows.filter((e) => e.competition_id === id).map((e) => e.race_id);
     return json({
       competitions: comps.map((c) => ({ ...c, excludedRaceIds: of(exclusions.results, c.id), pickedRaceIds: of(inclusions.results, c.id) })),
-      systems: Object.values(SYSTEMS).map((s) => ({ id: s.id, name: s.name, fields: s.fields, defaults: s.defaults, raceFields: s.raceFields ?? [], entity: s.entity, season: s.season })),
+      systems: Object.values(SYSTEMS).map((s) => ({ id: s.id, name: s.name, fields: s.fields, defaults: s.defaults, raceFields: s.raceFields ?? [], entity: s.entity, season: s.season, distanceWeighting: Boolean(s.distanceWeighting) })),
     });
   }
   let c = m(/^\/api\/admin\/competitions\/(\d+)$/);
   if (c && post) {
-    const b = await body<{ name?: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null; active?: boolean; displayOrder?: number; visibility?: "members" | "admin"; raceSelection?: "all" | "picked"; season?: number }>(request);
+    const b = await body<{ name?: string; params?: unknown; racesCounted?: "all" | "best"; bestX?: number | null; active?: boolean; displayOrder?: number; visibility?: "members" | "admin"; raceSelection?: "all" | "picked"; distanceWeighting?: boolean; season?: number }>(request);
     const res = await updateCompetition(ctx, Number(c[1]), b, actor, Number(b.season) || (await seasonParam()));
     return json({ ok: true, ...res });
   }

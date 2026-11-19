@@ -640,6 +640,7 @@ interface SystemInfo {
     showWhen?: { key: string; value: string };
   }[];
   raceFields?: { key: string; label: string }[];
+  distanceWeighting?: boolean;
   defaults: Record<string, unknown>;
 }
 
@@ -701,6 +702,7 @@ function CompetitionEditor({
   const [bestX, setBestX] = useState<number | null>(comp.bestX);
   const [visibility, setVisibility] = useState(comp.visibility);
   const [raceSelection, setRaceSelection] = useState(comp.raceSelection);
+  const [distanceWeighting, setDistanceWeighting] = useState(comp.distanceWeighting);
   const [racesOpen, setRacesOpen] = useState(comp.raceSelection === "picked" && comp.pickedRaceIds.length === 0);
   const save = useAction();
   const raceAction = useAction();
@@ -711,7 +713,7 @@ function CompetitionEditor({
         onSubmit={(e) => {
           e.preventDefault();
           void save.run(async () => {
-            const r = await post<{ recalculate: boolean }>(`/api/admin/competitions/${comp.id}`, { name, params, racesCounted, bestX, visibility, raceSelection, season });
+            const r = await post<{ recalculate: boolean }>(`/api/admin/competitions/${comp.id}`, { name, params, racesCounted, bestX, visibility, raceSelection, distanceWeighting, season });
             if (r.recalculate) onRecalculate(comp.id, name);
             else onSaved();
             return r;
@@ -739,6 +741,17 @@ function CompetitionEditor({
             <option value="picked">Only races I pick (below)</option>
           </select>
         </label>
+        {comp.supportsDistanceWeighting && (
+          <label className="flex items-start gap-2 sm:col-span-2">
+            <input type="checkbox" className="mt-1" checked={distanceWeighting} onChange={(e) => setDistanceWeighting(e.target.checked)} />
+            <span>
+              <strong>Points grow with distance</strong>
+              <span className="block text-xs text-muted">
+                Every point in a race × race km ÷ the season's first race km (average of shortest and longest loft), so a win in the final is worth more than in the first race.
+              </span>
+            </span>
+          </label>
+        )}
         {comp.raceFields.length > 0 && (
           <p className="text-xs text-muted sm:col-span-2">
             {comp.raceFields.map((f) => f.label).join(" and ")} are set per race, on each race's admin page.
@@ -827,6 +840,7 @@ function NewCompetition({ systems, season, onCreated }: { systems: SystemInfo[];
   const [params, setParams] = useState<Record<string, unknown>>(system?.defaults ?? {});
   const [visibility, setVisibility] = useState<"members" | "admin">("admin");
   const [raceSelection, setRaceSelection] = useState<"all" | "picked">("all");
+  const [distanceWeighting, setDistanceWeighting] = useState(false);
   const create = useAction();
   return (
     <Card title="Add a competition">
@@ -835,7 +849,7 @@ function NewCompetition({ systems, season, onCreated }: { systems: SystemInfo[];
         onSubmit={(e) => {
           e.preventDefault();
           void create.run(async () => {
-            const created = await post<{ id: number }>("/api/admin/competitions", { name, system: systemId, params, visibility, raceSelection, season });
+            const created = await post<{ id: number }>("/api/admin/competitions", { name, system: systemId, params, visibility, raceSelection, distanceWeighting, season });
             setName("");
             onCreated(created.id, name);
           }, "Created – calculating it for every race with results (see the panel at the top).");
@@ -872,6 +886,15 @@ function NewCompetition({ systems, season, onCreated }: { systems: SystemInfo[];
             <option value="picked">Only races I pick (e.g. a distance band)</option>
           </select>
         </label>
+        {system?.distanceWeighting && (
+          <label className="flex items-start gap-2 sm:col-span-2">
+            <input type="checkbox" className="mt-1" checked={distanceWeighting} onChange={(e) => setDistanceWeighting(e.target.checked)} />
+            <span>
+              <strong>Points grow with distance</strong>
+              <span className="block text-xs text-muted">Race points × race km ÷ the season's first race km.</span>
+            </span>
+          </label>
+        )}
         {system && (system.raceFields ?? []).length > 0 && (
           <p className="text-xs text-muted sm:col-span-2">This system also needs {(system.raceFields ?? []).map((f) => f.label.toLowerCase()).join(" and ")} set on each race's admin page.</p>
         )}
@@ -946,7 +969,7 @@ function SettingsPage({ season, passwordSet }: { season: number; passwordSet: bo
       <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted">Competitions</h2>
       {comps.data.competitions.map((c) => (
         <CompetitionEditor
-          key={`${c.id}-${c.name}-${JSON.stringify(c.params)}-${c.racesCounted}-${c.bestX}-${c.visibility}-${c.raceSelection}`}
+          key={`${c.id}-${c.name}-${JSON.stringify(c.params)}-${c.racesCounted}-${c.bestX}-${c.visibility}-${c.raceSelection}-${c.distanceWeighting}`}
           comp={c}
           systems={comps.data!.systems}
           races={races.data ?? []}

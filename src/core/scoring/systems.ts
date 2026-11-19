@@ -46,6 +46,8 @@ export interface ScoringSystem<P extends Record<string, unknown> = Record<string
   season: "sum" | "ratio";
   /** Short label for the score column, e.g. "Points", "Wins", "%". */
   unit: string;
+  /** Can points be multiplied by race distance? (Not for counts like wins, or percentages.) */
+  distanceWeighting?: boolean;
   /** True if scores depend on the competition's first race this season (RaceContext.baseBirds). */
   usesBaseRace?: boolean | ((params: P) => boolean);
   /**
@@ -110,6 +112,7 @@ type TopNParams = { scoringBirds: number; scale: "race" | "first-race" | "fixed"
 
 export const topNPerFancier: ScoringSystem<TopNParams> = {
   id: "top-n-per-fancier",
+  distanceWeighting: true,
   name: "First N birds per fancier",
   entity: "fancier",
   season: "sum",
@@ -158,6 +161,7 @@ function parseDefaultClosing(raw: unknown): { closingDay?: number; closingTime?:
 
 export const weightedByBasketing: ScoringSystem<{ closingDay?: number; closingTime?: string }> = {
   id: "weighted-by-basketing",
+  distanceWeighting: true,
   name: "Weighted by birds basketed (closing time)",
   entity: "fancier",
   season: "sum",
@@ -183,6 +187,7 @@ export const weightedByBasketing: ScoringSystem<{ closingDay?: number; closingTi
 /** Best bird: every bird home scores 100 (1st) down to 1 (last); points add up per bird over the season. */
 export const birdPoints: ScoringSystem<Record<string, never>> = {
   id: "bird-points",
+  distanceWeighting: true,
   name: "Best bird (100 to 1 per race)",
   entity: "bird",
   season: "sum",
@@ -202,6 +207,7 @@ export const birdPoints: ScoringSystem<Record<string, never>> = {
  */
 export const baseBirdPoints: ScoringSystem<Record<string, never>> = {
   id: "bird-points-base",
+  distanceWeighting: true,
   name: "Best bird (first race sets the points)",
   entity: "bird",
   season: "sum",

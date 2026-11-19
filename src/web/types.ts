@@ -42,6 +42,8 @@ export interface Calc {
   publishedAt: string | null;
   n: number;
   warnings: string[];
+  /** Distance weighting applied to this race, if any. */
+  distance?: { factor: number; raceKm: number; baseKm: number; baseRace: string } | null;
   lines: { scoringPosition: number; points: number; fancierId: string; fancierName: string; ring: string; benzingPosition: number; speed: number; arrivalDay: number; arrivalTime: string }[];
   fanciers: { rank: number | null; fancierId: string; fancierName: string; score: number; birdsScored: number; benzingPositions: number[]; points?: number; basketed?: number }[];
   excluded: { arrivalId: string; reason: string; ring: string | null }[];
@@ -61,6 +63,8 @@ export interface CompetitionInfo {
   displayOrder: number;
   visibility: "members" | "admin";
   raceSelection: "all" | "picked";
+  distanceWeighting: boolean;
+  supportsDistanceWeighting: boolean;
   entity: "fancier" | "bird";
   seasonMode: "sum" | "ratio";
   unit: string;

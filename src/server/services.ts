@@ -5,6 +5,7 @@
 import { pickFullResult, type BenzingRace } from "../core/benzing/parseRaceList";
 import type { LiveArrival } from "../core/benzing/parseLiveArrivals";
 import type { Override, RaceCalculation } from "../core/scoring/fiveBird";
+import { applyDistanceFactor, distanceFactor, raceAverageM } from "../core/scoring/distance";
 import { getSystem, MissingRaceSettings, usesBaseRace } from "../core/scoring/systems";
 import { BenzingClient, BenzingError, type ClubRef } from "./benzingClient";
 import { CLUB_ID, type D1Database } from "./env";
@@ -66,6 +67,8 @@ export interface CompetitionRow {
   races_counted: "all" | "best";
   best_x: number | null;
   version_created_at: string;
+  /** 1 = race points × race km ÷ first race km (versioned with the other settings). */
+  distance_weighting: number;
   version_actor: string;
 }
 
@@ -88,6 +91,8 @@ export interface CalcRow {
 /** Stored with each draft: warnings that must be acknowledged before publishing. */
 export interface StoredCalcResult extends RaceCalculation {
   warnings: string[];
+  /** Distance weighting applied to this race (absent = none). */
+  distance?: { factor: number; raceKm: number; baseKm: number; baseRace: string };
 }
 
 export class UserError extends Error {
@@ -152,7 +157,7 @@ export async function getRace(db: D1Database, raceId: number): Promise<RaceRow> 
 }
 
 const COMPETITION_SQL = `SELECT c.id, c.name, c.slug, c.system, c.display_order, c.active, c.visibility, c.race_selection,
-    v.id AS version_id, v.params_json, v.races_counted, v.best_x, v.created_at AS version_created_at, v.actor AS version_actor
+    v.id AS version_id, v.params_json, v.races_counted, v.best_x, v.distance_weighting, v.created_at AS version_created_at, v.actor AS version_actor
   FROM competition c JOIN competition_version v ON v.id = (SELECT MAX(id) FROM competition_version WHERE competition_id = c.id)
   WHERE c.club_id = ?`;
 
@@ -211,6 +216,34 @@ export async function baseBirdsFor(db: D1Database, comp: Pick<CompetitionRow, "i
   // Score the base race on its own scale (no base) to get its number of scoring birds.
   const calc = scoreArrivals(await fancierIdsByName(db), JSON.parse(row.arrivals_json) as StoredArrival[], comp, overrides, null, row.basketed_total, null);
   return calc.n || null;
+}
+
+/**
+ * Distance weighting for one race of a competition: race average km ÷ the average km of the competition's
+ * first race this season (by date) that it uses. Null when switched off, unsupported or distances are unknown.
+ */
+export async function distanceFor(
+  db: D1Database,
+  comp: Pick<CompetitionRow, "id" | "race_selection" | "system" | "distance_weighting">,
+  race: Pick<RaceRow, "season" | "min_distance_m" | "max_distance_m">,
+): Promise<StoredCalcResult["distance"] | null> {
+  if (!comp.distance_weighting || !getSystem(comp.system).distanceWeighting) return null;
+  const base = await db
+    .prepare(
+      `SELECT r.name, r.min_distance_m, r.max_distance_m FROM race r
+       WHERE r.club_id = ? AND r.season = ? AND r.kind = 'race' AND r.included = 1
+         AND (r.min_distance_m IS NOT NULL OR r.max_distance_m IS NOT NULL)
+         AND CASE WHEN ? = 'picked'
+               THEN EXISTS (SELECT 1 FROM competition_inclusion i WHERE i.competition_id = ? AND i.race_id = r.id)
+               ELSE NOT EXISTS (SELECT 1 FROM competition_exclusion e WHERE e.competition_id = ? AND e.race_id = r.id) END
+       ORDER BY r.race_date, r.race_number LIMIT 1`,
+    )
+    .bind(CLUB_ID, race.season, comp.race_selection, comp.id, comp.id)
+    .first<{ name: string; min_distance_m: number | null; max_distance_m: number | null }>();
+  const raceM = raceAverageM(race.min_distance_m, race.max_distance_m);
+  const baseM = base ? raceAverageM(base.min_distance_m, base.max_distance_m) : null;
+  if (!raceM || !baseM) return null;
+  return { factor: distanceFactor(raceM, baseM), raceKm: Math.round(raceM / 10) / 100, baseKm: Math.round(baseM / 10) / 100, baseRace: base!.name };
 }
 
 /** Does this competition use this race? (race-level kind/included are checked by the standings.) */
@@ -420,9 +453,11 @@ async function createDrafts(db: D1Database, race: RaceRow, actor: string, now: D
     // Base-race systems (best bird): the competition's first race this season sets the points scale.
     const system = getSystem(comp.system);
     const baseBirds = usesBaseRace(system, system.parse(JSON.parse(comp.params_json))) ? await baseBirdsFor(db, comp, race.season) : null;
+    const distance = await distanceFor(db, comp, race);
     let calc;
     try {
       calc = scoreArrivals(ids, arrivals, comp, engineOverrides, rp, race.basketed_total, baseBirds);
+      if (distance) calc = applyDistanceFactor(calc, distance.factor);
     } catch (e) {
       // e.g. the weighted competition has no closing time for this race: nothing is guessed.
       if (e instanceof MissingRaceSettings) {
@@ -434,7 +469,8 @@ async function createDrafts(db: D1Database, race: RaceRow, actor: string, now: D
     const inputsHash = await sha256(
       JSON.stringify({
         snapshot: snap.content_sha256, system: comp.system, params: comp.params_json, raceParams: rp,
-        raceBasketed: race.basketed_total, ...(baseBirds !== null ? { baseBirds } : {}), overrides: engineOverrides,
+        raceBasketed: race.basketed_total, ...(baseBirds !== null ? { baseBirds } : {}), ...(distance ? { distance: distance.factor } : {}),
+        overrides: engineOverrides,
       }),
     );
     const prev = latest.get(comp.id);
@@ -442,7 +478,7 @@ async function createDrafts(db: D1Database, race: RaceRow, actor: string, now: D
       out.push({ competitionId: comp.id, calcId: prev.id, changed: false });
       continue;
     }
-    const stored: StoredCalcResult = { ...calc, warnings };
+    const stored: StoredCalcResult = { ...calc, warnings, ...(distance ? { distance } : {}) };
     // The new calc's id is read back inside the same batch (D1 batches run in order, as one transaction).
     const newId = "(SELECT MAX(id) FROM race_calc WHERE race_id = ? AND competition_id = ?)";
     await db.batch([
@@ -650,6 +686,7 @@ export async function updateRace(ctx: Ctx, raceId: number, patch: { kind?: strin
 
 export interface CompetitionInput {
   name?: string;
+  distanceWeighting?: boolean;
   visibility?: "members" | "admin";
   raceSelection?: "all" | "picked";
   params?: unknown;
@@ -690,22 +727,30 @@ export async function updateCompetition(ctx: Ctx, competitionId: number, input: 
     .bind(name, active, order, visibility, raceSelection, competitionId)
     .run();
   const paramsJson = JSON.stringify(params);
-  const versionChanged = paramsJson !== before.params_json || racesCounted !== before.races_counted || bestX !== before.best_x;
+  const distanceWeighting = input.distanceWeighting === undefined ? before.distance_weighting : input.distanceWeighting && system.distanceWeighting ? 1 : 0;
+  const versionChanged =
+    paramsJson !== before.params_json || racesCounted !== before.races_counted || bestX !== before.best_x || distanceWeighting !== before.distance_weighting;
   if (versionChanged) {
     await ctx.db
-      .prepare("INSERT INTO competition_version (competition_id, params_json, races_counted, best_x, created_at, actor) VALUES (?, ?, ?, ?, ?, ?)")
-      .bind(competitionId, paramsJson, racesCounted, bestX, iso(now), actor)
+      .prepare("INSERT INTO competition_version (competition_id, params_json, races_counted, best_x, distance_weighting, created_at, actor) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .bind(competitionId, paramsJson, racesCounted, bestX, distanceWeighting, iso(now), actor)
       .run();
   }
   await audit(ctx.db, now, actor, "competition-update", "competition", competitionId, {
-    before: { name: before.name, params: before.params_json, racesCounted: before.races_counted, bestX: before.best_x, active: before.active, visibility: before.visibility },
-    after: { name, params: paramsJson, racesCounted, bestX, active, visibility, raceSelection },
+    before: {
+      name: before.name, params: before.params_json, racesCounted: before.races_counted, bestX: before.best_x, active: before.active,
+      visibility: before.visibility, distanceWeighting: before.distance_weighting,
+    },
+    after: { name, params: paramsJson, racesCounted, bestX, active, visibility, raceSelection, distanceWeighting },
   });
   // Scoring changes alter race results: create fresh drafts for the admin to review and publish.
   // Scoring changes alter race results. The admin page then recalculates race by race (one request each,
   // to stay inside the free plan's per-request limits) and the admin reviews and publishes the drafts.
   void season;
-  return { recalculate: paramsJson !== before.params_json || (active === 1 && before.active !== 1) || raceSelection !== before.race_selection };
+  return {
+    recalculate:
+      paramsJson !== before.params_json || (active === 1 && before.active !== 1) || raceSelection !== before.race_selection || distanceWeighting !== before.distance_weighting,
+  };
 }
 
 export async function createCompetition(
@@ -718,6 +763,7 @@ export async function createCompetition(
     bestX?: number | null;
     visibility?: "members" | "admin";
     raceSelection?: "all" | "picked";
+    distanceWeighting?: boolean;
   },
   actor: string,
   season: number,
@@ -746,8 +792,8 @@ export async function createCompetition(
     .run();
   const id = res.meta.last_row_id!;
   await ctx.db
-    .prepare("INSERT INTO competition_version (competition_id, params_json, races_counted, best_x, created_at, actor) VALUES (?, ?, ?, ?, ?, ?)")
-    .bind(id, JSON.stringify(params), racesCounted, bestX, iso(now), actor)
+    .prepare("INSERT INTO competition_version (competition_id, params_json, races_counted, best_x, distance_weighting, created_at, actor) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .bind(id, JSON.stringify(params), racesCounted, bestX, input.distanceWeighting && system.distanceWeighting ? 1 : 0, iso(now), actor)
     .run();
   await audit(ctx.db, now, actor, "competition-create", "competition", id, { name, system: system.id, params, racesCounted, bestX });
   void season;

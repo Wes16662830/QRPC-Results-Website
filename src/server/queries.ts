@@ -1,10 +1,11 @@
 /** Read models for the site. Members only ever see PUBLISHED 5-bird results. */
 import { calculateSeason } from "../core/scoring/fiveBird";
+import { applyDistanceFactor } from "../core/scoring/distance";
 import { ratioSeason } from "../core/scoring/extraSystems";
 import { getSystem, MissingRaceSettings, usesBaseRace } from "../core/scoring/systems";
 import { CLUB_ID, type D1Database } from "./env";
 import {
-  baseBirdsFor, competition as loadCompetition, competitionExclusions, competitionInclusions, competitionUsesRace, competitions, getRace, isLiveActive, raceParamsFor, sastDate, scoreSnapshot, UserError,
+  baseBirdsFor, distanceFor, competition as loadCompetition, competitionExclusions, competitionInclusions, competitionUsesRace, competitions, getRace, isLiveActive, raceParamsFor, sastDate, scoreSnapshot, UserError,
   type CalcRow, type CompetitionRow, type RaceRow, type StoredArrival, type StoredCalcResult,
 } from "./services";
 
@@ -20,7 +21,13 @@ export function competitionInfo(c: CompetitionRow) {
     system: c.system,
     systemName: system.name,
     params,
-    rules: system.describe(params),
+    rules:
+      system.describe(params) +
+      (c.distance_weighting && system.distanceWeighting
+        ? " Points grow with distance: every point in a race is multiplied by its distance ÷ the season's first race distance (average of the shortest and longest loft)."
+        : ""),
+    distanceWeighting: Boolean(c.distance_weighting && system.distanceWeighting),
+    supportsDistanceWeighting: Boolean(system.distanceWeighting),
     racesCounted: c.races_counted,
     bestX: c.best_x,
     active: c.active === 1,
@@ -121,6 +128,7 @@ function decorateCalc(calc: StoredCalcResult, names: Map<string, string>, arriva
   return {
     n: calc.n,
     warnings: calc.warnings ?? [],
+    distance: calc.distance ?? null,
     lines: calc.lines.map((l) => {
       const a = byOrder.get(l.arrivalId);
       return {
@@ -445,7 +453,9 @@ export async function live(db: D1Database, now: Date) {
       try {
         const system = getSystem(comp.system);
         const baseBirds = usesBaseRace(system, system.parse(JSON.parse(comp.params_json))) ? await baseBirdsFor(db, comp, race.season) : null;
-        const calc = await scoreSnapshot(db, arrivals, comp, [], raceParams.get(comp.id) ?? null, race.basketed_total, baseBirds);
+        const distance = await distanceFor(db, comp, race);
+        const raw = await scoreSnapshot(db, arrivals, comp, [], raceParams.get(comp.id) ?? null, race.basketed_total, baseBirds);
+        const calc = distance ? { ...applyDistanceFactor(raw, distance.factor), distance } : raw;
         provisional.push({ competition: competitionInfo(comp), result: decorateCalc({ ...calc, warnings: [] }, names, arrivals) });
       } catch (e) {
         if (!(e instanceof MissingRaceSettings)) throw e; // e.g. no closing time set yet: leave this competition out

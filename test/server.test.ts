@@ -396,6 +396,45 @@ describe("competitions (multiple result systems)", () => {
     expect((await leaderboard(db, 2027)).week).toBeNull();
   });
 
+  it("distance weighting: race points × race km ÷ the first race km", async () => {
+    const m1 = readFileSync(new URL("../fixtures/benzing/r-6429-t-17076-matatiele-1.html", import.meta.url), "utf8");
+    const { db, ctx } = setup({ "/za/en/results/view/r-6429-t-17076-matatiele-1/": m1 });
+    const mooi = await mooiRiverId(ctx);
+    const mat1 = (await db.prepare("SELECT id FROM race WHERE benzing_race_id = 6429").first<{ id: number }>())!.id;
+    for (const id of [mat1, mooi]) await calculateResults(ctx, id, ADMIN);
+    await recalculateRace(ctx, mooi, ADMIN);
+    const before = draftOf(await adminRaceDetail(db, mooi, NOW))!;
+    expect(before.distance).toBeNull();
+    const glennBefore = before.fanciers.find((f) => f.fancierName === "Glenn Mcewan")!.score; // 142 on the first-race scale
+
+    // Wins can't be distance weighted (a win is a count).
+    const winsId = (await db.prepare("SELECT id FROM competition WHERE slug = 'wins'").first<{ id: number }>())!.id;
+    expect(await updateCompetition(ctx, winsId, { distanceWeighting: true }, ADMIN, 2026)).toEqual({ recalculate: false });
+
+    expect(await updateCompetition(ctx, 1, { distanceWeighting: true }, ADMIN, 2026)).toEqual({ recalculate: true });
+    for (const id of [mat1, mooi]) await recalculateRace(ctx, id, ADMIN, 1);
+    const km = async (id: number) => {
+      const r = (await db.prepare("SELECT min_distance_m AS a, max_distance_m AS b FROM race WHERE id = ?").bind(id).first<{ a: number; b: number }>())!;
+      return (r.a + r.b) / 2;
+    };
+    const factor = Math.round(((await km(mooi)) / (await km(mat1))) * 10000) / 10000;
+    expect(factor).toBeGreaterThan(1.4); // Mooi River (~475 km) is much further than Matatiele 1
+
+    const base = draftOf(await adminRaceDetail(db, mat1, NOW))!;
+    expect(base.distance).toMatchObject({ factor: 1, baseRace: "MATATIELE 1" });
+    expect(base.lines[0]!.points).toBe(36); // the first race is ×1
+
+    const after = draftOf(await adminRaceDetail(db, mooi, NOW))!;
+    expect(after.distance).toMatchObject({ factor, baseRace: "MATATIELE 1" });
+    expect(after.lines[0]!.points).toBe(Math.round(36 * factor * 100) / 100); // a win is worth more further away
+    expect(after.fanciers.find((f) => f.fancierName === "Glenn Mcewan")!.score).toBe(Math.round(glennBefore * factor * 100) / 100);
+
+    // Switching it off returns to unweighted points.
+    await updateCompetition(ctx, 1, { distanceWeighting: false }, ADMIN, 2026);
+    await recalculateRace(ctx, mooi, ADMIN, 1);
+    expect(draftOf(await adminRaceDetail(db, mooi, NOW))!.fanciers.find((f) => f.fancierName === "Glenn Mcewan")!.score).toBe(glennBefore);
+  });
+
   it("best bird, distance bands, wins and top 25 %: standings by bird, by count and by season ratio", async () => {
     const { db, ctx } = setup();
     const raceId = await mooiRiverId(ctx);

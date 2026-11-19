@@ -3,7 +3,18 @@ import { fmtArrival, fmtPoints, fmtSpeed } from "./format";
 import type { Calc, CompetitionInfo, FullRow, RaceDetail } from "./types";
 import { FancierLink, TableWrap } from "./ui";
 
-type CalcView = Pick<Calc, "n" | "lines" | "fanciers" | "excluded">;
+type CalcView = Pick<Calc, "n" | "lines" | "fanciers" | "excluded"> & { distance?: Calc["distance"] };
+
+/** "Distance ×1.55: 475 km ÷ 306 km (Matatiele 1)" under a distance-weighted result. */
+function DistanceNote({ calc }: { calc: CalcView }) {
+  const d = calc.distance;
+  if (!d) return null;
+  return (
+    <p className="mb-3 rounded-lg bg-accent-soft px-3 py-2 text-sm text-warn">
+      <strong>Distance ×{d.factor.toFixed(2)}</strong>: {d.raceKm.toLocaleString("en-ZA")} km ÷ {d.baseKm.toLocaleString("en-ZA")} km ({d.baseRace}). All points in this race are multiplied by this.
+    </p>
+  );
+}
 
 /** Result of one competition for one race: birds for bird competitions, fanciers otherwise. */
 export function CompetitionResultView({ calc, competition }: { calc: CalcView; competition: Pick<CompetitionInfo, "entity" | "unit" | "rules" | "params"> }) {
@@ -11,11 +22,17 @@ export function CompetitionResultView({ calc, competition }: { calc: CalcView; c
     return (
       <>
         <p className="mb-3 text-sm text-muted">{competition.rules}</p>
+        <DistanceNote calc={calc} />
         <ScoringBirds calc={calc} />
       </>
     );
   }
-  return <ScoreTable calc={calc} rules={competition.rules} unit={competition.unit} percent={Number(competition.params.percent) || undefined} />;
+  return (
+    <>
+      <DistanceNote calc={calc} />
+      <ScoreTable calc={calc} rules={competition.rules} unit={competition.unit} percent={Number(competition.params.percent) || undefined} />
+    </>
+  );
 }
 
 export function ScoreTable({ calc, rules, unit = "Points", percent }: { calc: CalcView; rules?: string; unit?: string; percent?: number }) {
