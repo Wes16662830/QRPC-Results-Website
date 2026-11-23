@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { handleApi } from "../src/server/api";
 import { setMemberPassword } from "../src/server/auth";
 import type { Env } from "../src/server/env";
-import { adminRaceDetail, championship, leaderboard, live, raceDetail, seasonStats } from "../src/server/queries";
+import { adminRaceDetail, championship, leaderboard, live, raceDetail, seasonStats, winningMarginSeconds } from "../src/server/queries";
 import {
   addOverride, calculateResults, crossCheck, isLiveActive, pollLive, publish, recalculateRace,
   recalculateSeason, revokeOverride, sastToUtc, syncRaces, updateCompetition, createCompetition, setCompetitionRace, setCompetitionRaceParams, updateRace, type Ctx, type StoredArrival,
@@ -385,7 +385,13 @@ describe("competitions (multiple result systems)", () => {
     expect(st.wins.reduce((n, w) => n + w.wins, 0)).toBe(2);
     expect(st.wins.find((w) => w.fancierName === "Wesley Phillips")).toBeTruthy(); // first bird at Mooi River
     expect(st.fastest!.speed).toBeGreaterThanOrEqual(1279.742);
-    expect(st.closest!.gap).toBeGreaterThanOrEqual(0);
+    expect(st.closest!.seconds).toBeGreaterThanOrEqual(0);
+    expect(st.biggest!.seconds).toBeGreaterThanOrEqual(st.closest!.seconds);
+    expect(st.biggest!.first).not.toBe(st.biggest!.second);
+    // Same loft, same distance: the time gap equals the clock difference (Wesley's 14:28:13 and 14:28:16 at Mooi River).
+    expect(winningMarginSeconds(477685, 1279742, 1279571)).toBe(3);
+    // Different lofts: measured over the winner's distance, 463.653 km at 1274.706 vs 1272.094 m/min.
+    expect(winningMarginSeconds(463653, 1274706, 1272094)).toBe(44.8);
     expect(st.closest!.first).not.toBe(st.closest!.second);
     expect(st.everyRace.count).toBeGreaterThan(0);
     expect(st.returnRate[0]!.pct).toBeGreaterThanOrEqual(st.returnRate.at(-1)!.pct);

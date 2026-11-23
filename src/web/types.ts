@@ -137,6 +137,16 @@ export interface Home {
   stats: SeasonStats | null;
 }
 
+/** Winner vs the next fancier's best bird: time over the winner's distance. */
+export interface Margin {
+  raceId: number;
+  raceName: string;
+  seconds: number;
+  speedGap: number;
+  first: string;
+  second: string;
+}
+
 export interface SeasonStats {
   racesFlown: number;
   basketed: number;
@@ -144,7 +154,8 @@ export interface SeasonStats {
   returnPct: number | null;
   fastest: { ring: string; fancierName: string; speed: number; raceId: number; raceName: string } | null;
   wins: { fancierName: string; wins: number }[];
-  closest: { raceId: number; raceName: string; gap: number; first: string; second: string } | null;
+  closest: Margin | null;
+  biggest: Margin | null;
   everyRace: { count: number; top: { ring: string; fancierName: string }[] };
   returnRate: { fancierId: number; fancierName: string; basketed: number; returned: number; pct: number }[];
   bestBird: { competition: string; slug: string; top: { rank: number; ring: string; fancierName: string; total: number }[] } | null;

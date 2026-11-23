@@ -473,6 +473,15 @@ export async function live(db: D1Database, now: Date) {
 }
 
 /**
+ * Time by which the winner beat another bird, over the winner's distance: distance ÷ speed for each bird,
+ * in seconds to 1 decimal. Speeds are m/min × 1000, distance in metres.
+ */
+export function winningMarginSeconds(winnerDistanceM: number, winnerSpeedMilli: number, otherSpeedMilli: number): number {
+  const minutes = (speedMilli: number) => winnerDistanceM / (speedMilli / 1000);
+  return Math.round((minutes(otherSpeedMilli) - minutes(winnerSpeedMilli)) * 60 * 10) / 10;
+}
+
+/**
  * "Season so far" facts for the home page, from published races only (a race counts once any of its
  * results is published, so members never see figures from races still being checked).
  */
@@ -511,14 +520,20 @@ export async function seasonStats(db: D1Database, season: number) {
   }
   const wins = [...winsBy].map(([fancierName, n]) => ({ fancierName, wins: n })).sort((a, b) => b.wins - a.wins || a.fancierName.localeCompare(b.fancierName));
 
-  // Closest finish: smallest speed gap between the winning bird and the best bird of another fancier.
-  let closest: { raceId: number; raceName: string; gap: number; first: string; second: string } | null = null;
+  // Winning margins: the winning bird against the best bird of another fancier. Lofts are at different
+  // distances, so the gap is in time over the WINNER's distance: how much later the runner-up's bird would
+  // have arrived flying that distance at its own speed (distance ÷ speed, in seconds).
+  type Margin = { raceId: number; raceName: string; seconds: number; speedGap: number; first: string; second: string };
+  let closest: Margin | null = null;
+  let biggest: Margin | null = null;
   for (const r of withArrivals) {
     const a = r.arrivals[0];
     const b = a ? r.arrivals.find((x) => x.fancierName !== a.fancierName) : undefined;
     if (!a || !b) continue;
-    const gap = (a.speedMilli - b.speedMilli) / 1000;
-    if (!closest || gap < closest.gap) closest = { raceId: r.id, raceName: r.name, gap, first: a.fancierName, second: b.fancierName };
+    const seconds = winningMarginSeconds(a.distanceM, a.speedMilli, b.speedMilli);
+    const m: Margin = { raceId: r.id, raceName: r.name, seconds, speedGap: (a.speedMilli - b.speedMilli) / 1000, first: a.fancierName, second: b.fancierName };
+    if (!closest || seconds < closest.seconds) closest = m;
+    if (!biggest || seconds > biggest.seconds) biggest = m;
   }
 
   // Birds home in every race so far.
@@ -560,6 +575,7 @@ export async function seasonStats(db: D1Database, season: number) {
     fastest,
     wins: wins.slice(0, 3),
     closest,
+    biggest,
     everyRace: { count: everyRace.length, top: everyRace.slice(0, 5).map(({ ring, fancierName }) => ({ ring, fancierName })) },
     returnRate: returnRate.slice(0, 3),
     bestBird: bestBird

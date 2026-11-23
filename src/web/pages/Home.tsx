@@ -1,8 +1,8 @@
 import { Link } from "react-router";
-import { fmtDate, fmtPoints, fmtSpeed } from "../format";
+import { fmtDate, fmtDuration, fmtPoints, fmtSpeed } from "../format";
 import { useApi } from "../hooks";
 import { useSeason } from "../season";
-import type { Home, SeasonStats } from "../types";
+import type { Home, Margin, SeasonStats } from "../types";
 import { Card, ErrorBox, FancierLink, Loading, PageTitle, Stat, StateBadge } from "../ui";
 
 export function HomePage() {
@@ -111,6 +111,26 @@ export function HomePage() {
   );
 }
 
+/** Winning margin in time: how much later the next fancier's bird would have arrived over the winner's distance. */
+function MarginCard({ title, m, verb }: { title: string; m: Margin; verb: string }) {
+  return (
+    <Card title={title}>
+      <p className="text-2xl font-bold">{fmtDuration(m.seconds)}</p>
+      <p className="mt-1 text-sm">
+        at{" "}
+        <Link className="underline" to={`/races/${m.raceId}`}>
+          {m.raceName}
+        </Link>
+        : {m.first} {verb} {m.second}
+      </p>
+      <p className="mt-1 text-xs text-muted">
+        Over the winner's distance ({fmtSpeed(m.speedGap)} m/min faster). Lofts are at different distances, so this is how much later {m.second}'s best bird would have
+        arrived flying the winner's distance.
+      </p>
+    </Card>
+  );
+}
+
 /** "Season so far": fun facts from the published races. */
 function SeasonSoFar({ stats, season }: { stats: SeasonStats; season: number }) {
   const medal = ["🥇", "🥈", "🥉"];
@@ -215,22 +235,8 @@ function SeasonSoFar({ stats, season }: { stats: SeasonStats; season: number }) 
           )}
         </Card>
 
-        {stats.closest && (
-          <Card title="Closest finish">
-            <p className="text-2xl font-bold">
-              {fmtSpeed(stats.closest.gap)} <span className="text-base font-normal text-muted">m/min</span>
-            </p>
-            <p className="mt-1 text-sm">
-              between the winner and the next fancier at{" "}
-              <Link className="underline" to={`/races/${stats.closest.raceId}`}>
-                {stats.closest.raceName}
-              </Link>
-            </p>
-            <p className="text-sm text-muted">
-              {stats.closest.first} just ahead of {stats.closest.second}
-            </p>
-          </Card>
-        )}
+        {stats.closest && <MarginCard title="Closest finish" m={stats.closest} verb="just ahead of" />}
+        {stats.biggest && stats.biggest.raceId !== stats.closest?.raceId && <MarginCard title="Biggest winning margin" m={stats.biggest} verb="ahead of" />}
       </div>
     </>
   );
