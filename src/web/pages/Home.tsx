@@ -139,10 +139,14 @@ function SeasonSoFar({ stats, season }: { stats: SeasonStats; season: number }) 
       <h2 className="mt-8 mb-3 text-lg font-bold">{season} so far</h2>
       <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
         <Stat label="Races flown" value={stats.racesFlown} />
-        <Stat label="Birds basketed" value={stats.basketed.toLocaleString("en-ZA")} />
-        <Stat label="Birds home" value={stats.home.toLocaleString("en-ZA")} />
+        <Stat label="Different birds home" value={stats.uniqueHome.toLocaleString("en-ZA")} />
+        <Stat label="Basketings" value={stats.basketed.toLocaleString("en-ZA")} />
         <Stat label="Club return" value={stats.returnPct === null ? "–" : `${stats.returnPct}%`} />
       </div>
+      <p className="-mt-2 mb-4 text-xs text-muted">
+        Basketings count a bird once per race. {stats.home.toLocaleString("en-ZA")} of them came home ({stats.returnPct ?? "–"}%), by{" "}
+        {stats.uniqueHome.toLocaleString("en-ZA")} different birds.
+      </p>
       <div className="grid gap-4 md:grid-cols-2">
         {stats.bestBird && stats.bestBird.top.length > 0 && (
           <Card title="Best bird so far" right={<Link to={`/championship?competition=${stats.bestBird.slug}`} className="text-sm text-muted underline">Full table</Link>}>

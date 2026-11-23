@@ -503,7 +503,10 @@ export async function seasonStats(db: D1Database, season: number) {
   const withArrivals = races.map((r) => ({ ...r, arrivals: JSON.parse(r.arrivals_json!) as StoredArrival[] }));
 
   const basketed = races.reduce((sum, r) => sum + (r.basketed_total ?? 0), 0);
+  // Returns are counted per race (a bird home in 9 races counts 9 times); uniqueHome counts each ring once.
+  // Unique birds BASKETED can't be known: Benzing only publishes basketed counts, not which birds.
   const home = withArrivals.reduce((sum, r) => sum + r.arrivals.length, 0);
+  const uniqueHome = new Set(withArrivals.flatMap((r) => r.arrivals.map((a) => a.ring))).size;
 
   // Fastest bird of the season.
   let fastest: { ring: string; fancierName: string; speed: number; raceId: number; raceName: string } | null = null;
@@ -569,8 +572,12 @@ export async function seasonStats(db: D1Database, season: number) {
 
   return {
     racesFlown: races.length,
+    /** Basketings: one per bird per race. */
     basketed,
+    /** Returns: one per bird per race. */
     home,
+    /** Different birds (rings) home at least once. */
+    uniqueHome,
     returnPct: basketed ? Math.round((home / basketed) * 1000) / 10 : null,
     fastest,
     wins: wins.slice(0, 3),

@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { parseResultPage } from "../src/core/benzing/parseResultPage";
 import { describe, expect, it } from "vitest";
 import { handleApi } from "../src/server/api";
 import { setMemberPassword } from "../src/server/auth";
@@ -382,6 +383,11 @@ describe("competitions (multiple result systems)", () => {
     // Home page "season so far" stats over the same two published races.
     const st = (await seasonStats(db, 2026))!;
     expect(st).toMatchObject({ racesFlown: 2, basketed: 408 + 372, home: 322 + 265, returnPct: 75.3 });
+    // Different birds: a ring home in both races counts once.
+    const m1Rings = new Set(parseResultPage(readFileSync(new URL("../fixtures/benzing/r-6429-t-17076-matatiele-1.html", import.meta.url), "utf8")).arrivals.map((a) => a.ring));
+    const mrRings = new Set(parseResultPage(readFileSync(new URL("../fixtures/benzing/r-6975-t-17084-mooiriver.html", import.meta.url), "utf8")).arrivals.map((a) => a.ring));
+    expect(st.uniqueHome).toBe(new Set([...m1Rings, ...mrRings]).size);
+    expect(st.uniqueHome).toBeLessThan(st.home);
     expect(st.wins.reduce((n, w) => n + w.wins, 0)).toBe(2);
     expect(st.wins.find((w) => w.fancierName === "Wesley Phillips")).toBeTruthy(); // first bird at Mooi River
     expect(st.fastest!.speed).toBeGreaterThanOrEqual(1279.742);

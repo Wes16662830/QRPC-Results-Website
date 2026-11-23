@@ -151,6 +151,7 @@ export interface SeasonStats {
   racesFlown: number;
   basketed: number;
   home: number;
+  uniqueHome: number;
   returnPct: number | null;
   fastest: { ring: string; fancierName: string; speed: number; raceId: number; raceName: string } | null;
   wins: { fancierName: string; wins: number }[];
